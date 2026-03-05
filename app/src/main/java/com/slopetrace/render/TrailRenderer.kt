@@ -11,6 +11,13 @@ import kotlin.math.min
 import javax.microedition.khronos.egl.EGLConfig
 import javax.microedition.khronos.opengles.GL10
 
+data class RenderTrailPoint(
+    val x: Float,
+    val y: Float,
+    val z: Float,
+    val rgba: FloatArray
+)
+
 class TrailRenderer : GLSurfaceView.Renderer {
     private data class TrailGeometry(
         val buffer: FloatBuffer,
@@ -18,13 +25,17 @@ class TrailRenderer : GLSurfaceView.Renderer {
         val color: FloatArray
     )
 
-    private val userTrails = mutableMapOf<String, TrailGeometry>()
+    private val userTrailChunks = mutableMapOf<String, List<TrailGeometry>>()
+    private val currentUserPoints = mutableMapOf<String, FloatArray>()
+    private val userColors = mutableMapOf<String, FloatArray>()
     private val lock = Any()
 
     private var program = 0
     private var aPositionHandle = 0
     private var uMvpHandle = 0
     private var uColorHandle = 0
+    private var uPointSizeHandle = 0
+    private var uPointModeHandle = 0
 
     private val projection = FloatArray(16)
     private val view = FloatArray(16)
@@ -32,38 +43,44 @@ class TrailRenderer : GLSurfaceView.Renderer {
     private val vp = FloatArray(16)
     private val mvp = FloatArray(16)
 
-    private var yawDeg = -30f
-    private var pitchDeg = 30f
-    private var zoom = 1.6f
+    private var yawDeg = -35f
+    private var pitchDeg = 33f
+    private var zoom = 1.8f
+    private var panEast = 0f
+    private var panNorth = 0f
 
     private var gridBuffer: FloatBuffer? = null
     private var gridPointCount = 0
     private var gridMinZ = 0f
 
     override fun onSurfaceCreated(gl: GL10?, config: EGLConfig?) {
-        GLES20.glClearColor(0.05f, 0.07f, 0.12f, 1f)
+        GLES20.glClearColor(0.03f, 0.04f, 0.08f, 1f)
         GLES20.glEnable(GLES20.GL_DEPTH_TEST)
+        GLES20.glEnable(GLES20.GL_BLEND)
+        GLES20.glBlendFunc(GLES20.GL_SRC_ALPHA, GLES20.GL_ONE_MINUS_SRC_ALPHA)
         GLES20.glLineWidth(3f)
         program = createProgram(VERTEX_SHADER, FRAGMENT_SHADER)
         aPositionHandle = GLES20.glGetAttribLocation(program, "aPosition")
         uMvpHandle = GLES20.glGetUniformLocation(program, "uMvp")
         uColorHandle = GLES20.glGetUniformLocation(program, "uColor")
+        uPointSizeHandle = GLES20.glGetUniformLocation(program, "uPointSize")
+        uPointModeHandle = GLES20.glGetUniformLocation(program, "uPointMode")
         Matrix.setIdentityM(model, 0)
     }
 
     override fun onSurfaceChanged(gl: GL10?, width: Int, height: Int) {
         GLES20.glViewport(0, 0, width, height)
         val aspect = width.toFloat() / height.toFloat().coerceAtLeast(1f)
-        Matrix.perspectiveM(projection, 0, 50f, aspect, 1f, 10000f)
+        Matrix.perspectiveM(projection, 0, 50f, aspect, 1f, 20000f)
     }
 
     override fun onDrawFrame(gl: GL10?) {
         GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT or GLES20.GL_DEPTH_BUFFER_BIT)
-
         GLES20.glUseProgram(program)
 
         val center = estimateCenter()
-        val eyeDistance = 350f * zoom
+        val extent = estimateExtent()
+        val eyeDistance = (max(200f, extent * 1.8f)) * zoom
         val yawRad = Math.toRadians(yawDeg.toDouble())
         val pitchRad = Math.toRadians(pitchDeg.toDouble())
         val ex = center[0] + (eyeDistance * kotlin.math.cos(pitchRad) * kotlin.math.cos(yawRad)).toFloat()
@@ -87,12 +104,61 @@ class TrailRenderer : GLSurfaceView.Renderer {
         Matrix.multiplyMM(mvp, 0, vp, 0, model, 0)
 
         drawGridIfPresent()
+        drawTrails()
+        drawCurrentPositions()
+    }
 
+    fun replaceTrails(
+        trailsByUser: Map<String, List<RenderTrailPoint>>,
+        currentPositionsByUser: Map<String, FloatArray>,
+        userColorById: Map<String, FloatArray>
+    ) {
         synchronized(lock) {
-            userTrails.values.forEach { trail ->
+            userTrailChunks.clear()
+            trailsByUser.forEach { (userId, points) ->
+                userTrailChunks[userId] = buildTrailChunks(points)
+            }
+            currentUserPoints.clear()
+            currentUserPoints.putAll(currentPositionsByUser)
+            userColors.clear()
+            userColors.putAll(userColorById)
+            rebuildGrid()
+        }
+    }
+
+    fun rotateBy(dx: Float, dy: Float) {
+        yawDeg += dx * 0.24f
+        pitchDeg = (pitchDeg - dy * 0.20f).coerceIn(2f, 88f)
+    }
+
+    fun panBy(dx: Float, dy: Float) {
+        val panScale = 0.90f * zoom
+        val yawRad = Math.toRadians(yawDeg.toDouble())
+        val cosYaw = kotlin.math.cos(yawRad).toFloat()
+        val sinYaw = kotlin.math.sin(yawRad).toFloat()
+
+        // Pan in camera space on ground plane:
+        // - horizontal drag: left/right relative to camera right vector
+        // - vertical drag: toward/away from camera
+        val deltaEast = (sinYaw * dx - cosYaw * dy) * panScale
+        val deltaNorth = (-cosYaw * dx - sinYaw * dy) * panScale
+
+        panEast += deltaEast
+        panNorth += deltaNorth
+    }
+
+    fun zoomBy(delta: Float) {
+        zoom = (zoom + delta).coerceIn(0.22f, 12.0f)
+    }
+
+    private fun drawTrails() {
+        synchronized(lock) {
+            userTrailChunks.values.flatten().forEach { trail ->
                 trail.buffer.position(0)
                 GLES20.glUniformMatrix4fv(uMvpHandle, 1, false, mvp, 0)
                 GLES20.glUniform4fv(uColorHandle, 1, trail.color, 0)
+                GLES20.glUniform1f(uPointSizeHandle, 1f)
+                GLES20.glUniform1i(uPointModeHandle, 0)
                 GLES20.glEnableVertexAttribArray(aPositionHandle)
                 GLES20.glVertexAttribPointer(aPositionHandle, 3, GLES20.GL_FLOAT, false, 3 * 4, trail.buffer)
                 GLES20.glDrawArrays(GLES20.GL_LINE_STRIP, 0, trail.pointCount)
@@ -101,30 +167,57 @@ class TrailRenderer : GLSurfaceView.Renderer {
         }
     }
 
-    fun setTrail(userId: String, points: List<FloatArray>) {
+    private fun drawCurrentPositions() {
         synchronized(lock) {
-            userTrails[userId] = buildTrailGeometry(userId, points)
-            rebuildGrid()
-        }
-    }
-
-    fun replaceTrails(trailsByUser: Map<String, List<FloatArray>>) {
-        synchronized(lock) {
-            userTrails.clear()
-            trailsByUser.forEach { (userId, points) ->
-                userTrails[userId] = buildTrailGeometry(userId, points)
+            currentUserPoints.forEach { (userId, point) ->
+                val color = userColors[userId] ?: floatArrayOf(1f, 1f, 1f, 1f)
+                val buffer = floatBufferOf(point)
+                GLES20.glUniformMatrix4fv(uMvpHandle, 1, false, mvp, 0)
+                GLES20.glUniform4fv(uColorHandle, 1, color, 0)
+                GLES20.glUniform1f(uPointSizeHandle, 13f)
+                GLES20.glUniform1i(uPointModeHandle, 1)
+                GLES20.glEnableVertexAttribArray(aPositionHandle)
+                GLES20.glVertexAttribPointer(aPositionHandle, 3, GLES20.GL_FLOAT, false, 3 * 4, buffer)
+                GLES20.glDrawArrays(GLES20.GL_POINTS, 0, 1)
+                GLES20.glDisableVertexAttribArray(aPositionHandle)
             }
-            rebuildGrid()
         }
     }
 
-    private fun buildTrailGeometry(userId: String, points: List<FloatArray>): TrailGeometry {
+    private fun buildTrailChunks(points: List<RenderTrailPoint>): List<TrailGeometry> {
+        if (points.size < 2) return emptyList()
+
+        val chunks = mutableListOf<TrailGeometry>()
+        var currentColor = points.first().rgba
+        var current = mutableListOf(points.first())
+
+        for (index in 1 until points.size) {
+            val point = points[index]
+            if (!sameColor(point.rgba, currentColor)) {
+                if (current.size >= 2) {
+                    chunks.add(geometryFromPoints(current, currentColor))
+                }
+                current = mutableListOf(points[index - 1], point)
+                currentColor = point.rgba
+            } else {
+                current.add(point)
+            }
+        }
+
+        if (current.size >= 2) {
+            chunks.add(geometryFromPoints(current, currentColor))
+        }
+
+        return chunks
+    }
+
+    private fun geometryFromPoints(points: List<RenderTrailPoint>, color: FloatArray): TrailGeometry {
         val flat = FloatArray(points.size * 3)
         var i = 0
         points.forEach { p ->
-            flat[i++] = p[0]
-            flat[i++] = p[1]
-            flat[i++] = p[2]
+            flat[i++] = p.x
+            flat[i++] = p.y
+            flat[i++] = p.z
         }
         val buffer = ByteBuffer.allocateDirect(flat.size * 4)
             .order(ByteOrder.nativeOrder())
@@ -134,42 +227,27 @@ class TrailRenderer : GLSurfaceView.Renderer {
         return TrailGeometry(
             buffer = buffer,
             pointCount = points.size,
-            color = userColor(userId)
+            color = color
         )
     }
 
-    fun minZ(): Float {
-        synchronized(lock) {
-            return userTrails.values.minOfOrNull { trail ->
-                var minZ = Float.MAX_VALUE
-                var index = 2
-                while (index < trail.pointCount * 3) {
-                    minZ = min(minZ, trail.buffer.get(index))
-                    index += 3
-                }
-                minZ
-            } ?: 0f
-        }
-    }
-
-    fun rotateBy(dx: Float, dy: Float) {
-        yawDeg += dx * 0.22f
-        pitchDeg = (pitchDeg - dy * 0.22f).coerceIn(8f, 82f)
-    }
-
-    fun zoomBy(delta: Float) {
-        zoom = (zoom + delta).coerceIn(0.55f, 4.0f)
+    private fun sameColor(a: FloatArray, b: FloatArray): Boolean {
+        if (a.size != b.size) return false
+        return a.indices.all { idx -> kotlin.math.abs(a[idx] - b[idx]) < 0.01f }
     }
 
     private fun estimateCenter(): FloatArray {
         synchronized(lock) {
-            if (userTrails.isEmpty()) return floatArrayOf(0f, 0f, 0f)
+            if (userTrailChunks.isEmpty() && currentUserPoints.isEmpty()) {
+                return floatArrayOf(panEast, panNorth, 0f)
+            }
 
             var sumX = 0f
             var sumY = 0f
             var minZ = Float.MAX_VALUE
             var count = 0
-            userTrails.values.forEach { trail ->
+
+            userTrailChunks.values.flatten().forEach { trail ->
                 val limit = trail.pointCount * 3
                 var idx = 0
                 while (idx < limit) {
@@ -181,10 +259,37 @@ class TrailRenderer : GLSurfaceView.Renderer {
                 }
             }
 
+            currentUserPoints.values.forEach { p ->
+                sumX += p[0]
+                sumY += p[1]
+                minZ = min(minZ, p[2])
+                count++
+            }
+
             val avgX = if (count == 0) 0f else sumX / count
             val avgY = if (count == 0) 0f else sumY / count
-            val centerZ = minZ + 30f
-            return floatArrayOf(avgX, avgY, centerZ)
+            val centerZ = if (minZ.isFinite()) minZ + 35f else 0f
+            return floatArrayOf(avgX + panEast, avgY + panNorth, centerZ)
+        }
+    }
+
+    private fun estimateExtent(): Float {
+        synchronized(lock) {
+            var maxAbs = 100f
+            userTrailChunks.values.flatten().forEach { trail ->
+                val limit = trail.pointCount * 3
+                var idx = 0
+                while (idx < limit) {
+                    maxAbs = max(maxAbs, kotlin.math.abs(trail.buffer.get(idx)))
+                    maxAbs = max(maxAbs, kotlin.math.abs(trail.buffer.get(idx + 1)))
+                    idx += 3
+                }
+            }
+            currentUserPoints.values.forEach { p ->
+                maxAbs = max(maxAbs, kotlin.math.abs(p[0]))
+                maxAbs = max(maxAbs, kotlin.math.abs(p[1]))
+            }
+            return maxAbs + 80f
         }
     }
 
@@ -192,19 +297,8 @@ class TrailRenderer : GLSurfaceView.Renderer {
         val minZ = minZ()
         gridMinZ = minZ
 
-        var maxAbs = 0f
-        userTrails.values.forEach { trail ->
-            val limit = trail.pointCount * 3
-            var idx = 0
-            while (idx < limit) {
-                maxAbs = max(maxAbs, kotlin.math.abs(trail.buffer.get(idx)))
-                maxAbs = max(maxAbs, kotlin.math.abs(trail.buffer.get(idx + 1)))
-                idx += 3
-            }
-        }
-
-        val half = max(100f, maxAbs + 50f)
-        val spacing = max(10f, half / 10f)
+        val half = estimateExtent()
+        val spacing = max(15f, half / 12f)
         val lineCountPerAxis = ((half * 2) / spacing).toInt() + 1
         val vertexCount = lineCountPerAxis * 4
         val vertices = FloatArray(vertexCount * 3)
@@ -237,11 +331,30 @@ class TrailRenderer : GLSurfaceView.Renderer {
         gridPointCount = vertexCount
     }
 
+    private fun minZ(): Float {
+        synchronized(lock) {
+            var minimum = Float.MAX_VALUE
+            userTrailChunks.values.flatten().forEach { trail ->
+                var index = 2
+                while (index < trail.pointCount * 3) {
+                    minimum = min(minimum, trail.buffer.get(index))
+                    index += 3
+                }
+            }
+            currentUserPoints.values.forEach { point ->
+                minimum = min(minimum, point[2])
+            }
+            return if (minimum == Float.MAX_VALUE) 0f else minimum
+        }
+    }
+
     private fun drawGridIfPresent() {
         val buffer = gridBuffer ?: return
         buffer.position(0)
         GLES20.glUniformMatrix4fv(uMvpHandle, 1, false, mvp, 0)
-        GLES20.glUniform4f(uColorHandle, 0.35f, 0.45f, 0.55f, 1f)
+        GLES20.glUniform4f(uColorHandle, 0.28f, 0.35f, 0.48f, 1f)
+        GLES20.glUniform1f(uPointSizeHandle, 1f)
+        GLES20.glUniform1i(uPointModeHandle, 0)
         GLES20.glEnableVertexAttribArray(aPositionHandle)
         GLES20.glVertexAttribPointer(aPositionHandle, 3, GLES20.GL_FLOAT, false, 3 * 4, buffer)
         GLES20.glLineWidth(1f)
@@ -250,22 +363,12 @@ class TrailRenderer : GLSurfaceView.Renderer {
         GLES20.glDisableVertexAttribArray(aPositionHandle)
     }
 
-    private fun userColor(userId: String): FloatArray {
-        val hue = (kotlin.math.abs(userId.hashCode()) % 360).toFloat()
-        val s = 0.72f
-        val v = 0.96f
-        val c = v * s
-        val x = c * (1 - kotlin.math.abs((hue / 60f) % 2 - 1f))
-        val m = v - c
-        val (r, g, b) = when {
-            hue < 60f -> floatArrayOf(c, x, 0f)
-            hue < 120f -> floatArrayOf(x, c, 0f)
-            hue < 180f -> floatArrayOf(0f, c, x)
-            hue < 240f -> floatArrayOf(0f, x, c)
-            hue < 300f -> floatArrayOf(x, 0f, c)
-            else -> floatArrayOf(c, 0f, x)
-        }
-        return floatArrayOf(r + m, g + m, b + m, 1f)
+    private fun floatBufferOf(point: FloatArray): FloatBuffer {
+        return ByteBuffer.allocateDirect(point.size * 4)
+            .order(ByteOrder.nativeOrder())
+            .asFloatBuffer()
+            .put(point)
+            .also { it.position(0) }
     }
 
     private fun createProgram(vertexSource: String, fragmentSource: String): Int {
@@ -289,16 +392,27 @@ class TrailRenderer : GLSurfaceView.Renderer {
         private const val VERTEX_SHADER = """
             attribute vec3 aPosition;
             uniform mat4 uMvp;
+            uniform float uPointSize;
             void main() {
                 gl_Position = uMvp * vec4(aPosition, 1.0);
+                gl_PointSize = uPointSize;
             }
         """
 
         private const val FRAGMENT_SHADER = """
             precision mediump float;
             uniform vec4 uColor;
+            uniform int uPointMode;
             void main() {
-                gl_FragColor = uColor;
+                if (uPointMode == 1) {
+                    vec2 c = gl_PointCoord - vec2(0.5, 0.5);
+                    float r = length(c);
+                    if (r > 0.5) discard;
+                    float shade = 1.0 - r * 0.9;
+                    gl_FragColor = vec4(uColor.rgb * shade, uColor.a);
+                } else {
+                    gl_FragColor = uColor;
+                }
             }
         """
     }

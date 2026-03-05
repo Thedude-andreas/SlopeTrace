@@ -30,7 +30,7 @@ import kotlinx.coroutines.launch
 @Composable
 fun LoginScreen(
     onLogin: suspend (String, String) -> Boolean,
-    onSignUp: suspend (String, String) -> Boolean,
+    onSignUp: suspend (String, String, String) -> Boolean,
     rememberMe: Boolean,
     onRememberMeChange: (Boolean) -> Unit,
     onSuccessNavigate: () -> Unit,
@@ -39,6 +39,7 @@ fun LoginScreen(
 ) {
     var email by remember { mutableStateOf("") }
     var password by remember { mutableStateOf("") }
+    var alias by remember { mutableStateOf("") }
     val scope = rememberCoroutineScope()
 
     Column(
@@ -80,6 +81,20 @@ fun LoginScreen(
             modifier = Modifier.fillMaxWidth()
         )
 
+        OutlinedTextField(
+            value = alias,
+            onValueChange = { alias = it },
+            label = { Text("Alias (used in session)") },
+            enabled = !isLoading,
+            singleLine = true,
+            keyboardOptions = KeyboardOptions(
+                capitalization = KeyboardCapitalization.Words,
+                imeAction = ImeAction.Done,
+                autoCorrectEnabled = true
+            ),
+            modifier = Modifier.fillMaxWidth()
+        )
+
         if (!errorMessage.isNullOrBlank()) {
             Text(
                 text = errorMessage,
@@ -117,7 +132,7 @@ fun LoginScreen(
             enabled = !isLoading,
             onClick = {
                 scope.launch {
-                    if (onSignUp(email.trim(), password)) {
+                    if (onSignUp(email.trim(), password, alias.trim())) {
                         onSuccessNavigate()
                     }
                 }

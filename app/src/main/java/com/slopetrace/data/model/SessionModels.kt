@@ -8,6 +8,12 @@ data class AppUser(
     val color: String
 )
 
+data class UserProfile(
+    val id: String,
+    val alias: String,
+    val color: String
+)
+
 data class Session(
     val id: String,
     val name: String,

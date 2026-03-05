@@ -13,8 +13,8 @@ import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.HorizontalDivider
-import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -28,6 +28,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.slopetrace.domain.stats.SessionEvent
 import com.slopetrace.domain.stats.SessionStats
+import com.slopetrace.ui.theme.AppPalette
 import kotlin.math.roundToInt
 
 @Composable
@@ -59,9 +60,11 @@ fun StatsScreen(
                 Text("Session", fontWeight = FontWeight.SemiBold)
                 HorizontalDivider()
                 Text("Runs: ${stats.totalRuns}")
-                Text("Total downhill time: ${formatDuration(stats.downhillTimeSeconds)}")
-                Text("Total lift time: ${formatDuration(stats.liftTimeSeconds)}")
-                Text("Total other time: ${formatDuration(stats.otherTimeSeconds)}")
+                Text("Downhill time: ${formatDuration(stats.downhillTimeSeconds)}")
+                Text("Downhill moving/stationary: ${formatDuration(stats.downhillMovingTimeSeconds)} / ${formatDuration(stats.downhillStationaryTimeSeconds)}")
+                Text("Lift time: ${formatDuration(stats.liftTimeSeconds)}")
+                Text("Lift moving/stationary: ${formatDuration(stats.liftMovingTimeSeconds)} / ${formatDuration(stats.liftStationaryTimeSeconds)}")
+                Text("Other time: ${formatDuration(stats.otherTimeSeconds)}")
                 Text("Max speed (session): ${toKmh(stats.maxSessionSpeedMps).roundToInt()} km/h")
             }
         }
@@ -70,11 +73,12 @@ fun StatsScreen(
             items(stats.events) { event ->
                 when (event) {
                     is SessionEvent.Lift -> {
+                        val liftColor = AppPalette.liftColor(event.stats.physicalLiftId)
                         val label = liftLabels[event.stats.physicalLiftId] ?: "Lift ${event.stats.index}"
                         Card(
                             colors = CardDefaults.cardColors(
-                                containerColor = Color(0xFFDDF3E8),
-                                contentColor = Color(0xFF133728)
+                                containerColor = liftColor.copy(alpha = 0.22f),
+                                contentColor = Color.White
                             ),
                             modifier = Modifier
                                 .fillMaxWidth()
@@ -88,11 +92,12 @@ fun StatsScreen(
                                 verticalArrangement = Arrangement.spacedBy(4.dp)
                             ) {
                                 Text("LIFT ${event.stats.index}", fontWeight = FontWeight.SemiBold)
-                                Text("Lift id: ${event.stats.physicalLiftId}")
-                                Text("Namn: $label")
-                                Text("Lift speed: ${event.stats.avgSpeedMps.roundToInt()} m/s")
-                                Text("Time in lift: ${formatDuration(event.stats.durationSeconds)}")
-                                Text("Tryck för att byta namn", style = MaterialTheme.typography.bodySmall)
+                                Text("Lift ID: ${event.stats.physicalLiftId}")
+                                Text("Name: $label")
+                                Text("Avg speed: ${"%.1f".format(event.stats.avgSpeedMps)} m/s")
+                                Text("Time: ${formatDuration(event.stats.durationSeconds)}")
+                                Text("Moving/stationary: ${formatDuration(event.stats.movingTimeSeconds)} / ${formatDuration(event.stats.stationaryTimeSeconds)}")
+                                Text("Tap to rename", style = MaterialTheme.typography.bodySmall)
                             }
                         }
                     }
@@ -100,8 +105,8 @@ fun StatsScreen(
                     is SessionEvent.Downhill -> {
                         Card(
                             colors = CardDefaults.cardColors(
-                                containerColor = Color(0xFFE3ECFB),
-                                contentColor = Color(0xFF10243E)
+                                containerColor = AppPalette.Downhill.copy(alpha = 0.22f),
+                                contentColor = Color.White
                             ),
                             modifier = Modifier
                                 .fillMaxWidth()
@@ -112,16 +117,17 @@ fun StatsScreen(
                             ) {
                                 Text("DOWNHILL ${event.stats.index}", fontWeight = FontWeight.SemiBold)
                                 Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                                    Text("Fallhöjd: ${event.stats.verticalDropMeters.roundToInt()} m")
-                                    Text("Tid: ${formatDuration(event.stats.durationSeconds)}")
+                                    Text("Vertical drop: ${event.stats.verticalDropMeters.roundToInt()} m")
+                                    Text("Time: ${formatDuration(event.stats.durationSeconds)}")
+                                }
+                                Text("Moving/stationary: ${formatDuration(event.stats.movingTimeSeconds)} / ${formatDuration(event.stats.stationaryTimeSeconds)}")
+                                Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                                    Text("Max speed: ${toKmh(event.stats.maxSpeedMps).roundToInt()} km/h")
+                                    Text("Avg speed: ${toKmh(event.stats.avgSpeedMps).roundToInt()} km/h")
                                 }
                                 Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                                    Text("Maxfart: ${toKmh(event.stats.maxSpeedMps).roundToInt()} km/h")
-                                    Text("Medelfart: ${toKmh(event.stats.avgSpeedMps).roundToInt()} km/h")
-                                }
-                                Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                                    Text("Medelvinkel: ${event.stats.meanAngleDeg.roundToInt()}°")
-                                    Text("Maxvinkel: ${event.stats.maxAngleDeg.roundToInt()}°")
+                                    Text("Mean angle: ${event.stats.meanAngleDeg.roundToInt()}°")
+                                    Text("Max angle: ${event.stats.maxAngleDeg.roundToInt()}°")
                                 }
                                 if (event.stats.airtimes.isEmpty()) {
                                     Text("Air time: -")
@@ -142,12 +148,12 @@ fun StatsScreen(
     if (liftId != null) {
         AlertDialog(
             onDismissRequest = { renameTargetLiftId = null },
-            title = { Text("Döp lift") },
+            title = { Text("Rename lift") },
             text = {
                 OutlinedTextField(
                     value = renameDraft,
                     onValueChange = { renameDraft = it },
-                    label = { Text("Liftnamn") }
+                    label = { Text("Lift name") }
                 )
             },
             confirmButton = {
@@ -157,12 +163,12 @@ fun StatsScreen(
                         renameTargetLiftId = null
                     }
                 ) {
-                    Text("Spara")
+                    Text("Save")
                 }
             },
             dismissButton = {
                 TextButton(onClick = { renameTargetLiftId = null }) {
-                    Text("Avbryt")
+                    Text("Cancel")
                 }
             }
         )

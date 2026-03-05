@@ -2,16 +2,23 @@ package com.slopetrace.ui.theme
 
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.darkColorScheme
-import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
 
-private val LightScheme = lightColorScheme()
-private val DarkScheme = darkColorScheme()
+private val DarkScheme = darkColorScheme(
+    primary = AppPalette.Accent,
+    onPrimary = AppPalette.Background,
+    background = AppPalette.Background,
+    onBackground = AppPalette.TextPrimary,
+    surface = AppPalette.Surface,
+    onSurface = AppPalette.TextPrimary,
+    surfaceVariant = AppPalette.SurfaceAlt,
+    onSurfaceVariant = AppPalette.TextSecondary
+)
 
 @Composable
 fun SlopeTraceTheme(content: @Composable () -> Unit) {
     MaterialTheme(
-        colorScheme = if (androidx.compose.foundation.isSystemInDarkTheme()) DarkScheme else LightScheme,
+        colorScheme = DarkScheme,
         content = content
     )
 }

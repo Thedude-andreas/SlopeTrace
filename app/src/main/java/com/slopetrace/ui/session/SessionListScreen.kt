@@ -8,22 +8,22 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.ExposedDropdownMenuBox
 import androidx.compose.material3.ExposedDropdownMenuDefaults
-import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.MenuAnchorType
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
-import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.dp
 import com.slopetrace.data.model.Session
 import java.time.Instant
@@ -45,7 +45,7 @@ fun SessionListScreen(
     isLoading: Boolean
 ) {
     val defaultSessionName = remember {
-        LocalDateTime.now().format(DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm", Locale("sv", "SE")))
+        LocalDateTime.now().format(DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm", Locale.ENGLISH))
     }
     var newSessionName by remember { mutableStateOf(defaultSessionName) }
     var selectedSessionId by remember { mutableStateOf("") }
@@ -59,7 +59,7 @@ fun SessionListScreen(
 
     val selectedSessionLabel = sessions.firstOrNull { it.id == selectedSessionId }?.let {
         "${it.name} (${formatSessionStart(it)})"
-    } ?: "Välj befintlig session"
+    } ?: "Select an existing session"
 
     Column(
         modifier = Modifier
@@ -73,7 +73,7 @@ fun SessionListScreen(
             value = newSessionName,
             onValueChange = { newSessionName = it },
             enabled = !isLoading,
-            label = { Text("Nytt sessionsnamn") },
+            label = { Text("New session name") },
             modifier = Modifier.fillMaxWidth()
         )
 
@@ -86,7 +86,7 @@ fun SessionListScreen(
                 onValueChange = {},
                 readOnly = true,
                 enabled = !isLoading,
-                label = { Text("Join befintlig session") },
+                label = { Text("Join existing session") },
                 trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = expanded) },
                 modifier = Modifier
                     .menuAnchor(MenuAnchorType.PrimaryNotEditable)
@@ -118,7 +118,7 @@ fun SessionListScreen(
         }
         if (!lastExportPath.isNullOrBlank()) {
             Text(
-                text = "Senaste export: $lastExportPath",
+                text = "Latest export: $lastExportPath",
                 color = Color(0xFF0B6E4F)
             )
         }
@@ -131,7 +131,7 @@ fun SessionListScreen(
                 if (isLoading) {
                     CircularProgressIndicator(strokeWidth = 2.dp)
                 } else {
-                    Text("Create new")
+                    Text("Create")
                 }
             }
             Button(
@@ -148,7 +148,7 @@ fun SessionListScreen(
                 Text("Refresh")
             }
             Button(onClick = onLive, enabled = !isLoading) {
-                Text("Live View")
+                Text("Live")
             }
         }
     }
@@ -159,5 +159,5 @@ private fun formatSessionStart(session: Session): String {
         .ofEpochMilli(session.startTime.toEpochMilliseconds())
         .atZone(ZoneId.systemDefault())
         .toLocalDateTime()
-    return localDateTime.format(DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm", Locale("sv", "SE")))
+    return localDateTime.format(DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm", Locale.ENGLISH))
 }

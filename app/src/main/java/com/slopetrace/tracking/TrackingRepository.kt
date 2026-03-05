@@ -2,8 +2,8 @@ package com.slopetrace.tracking
 
 import android.content.Context
 import android.os.Environment
-import com.slopetrace.data.local.TrackingDao
 import com.slopetrace.data.local.LiftLabelEntity
+import com.slopetrace.data.local.TrackingDao
 import com.slopetrace.data.local.TrackingPointEntity
 import com.slopetrace.data.model.SegmentType
 import com.slopetrace.data.model.TrackingPoint
@@ -23,12 +23,12 @@ import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonArray
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
+import java.io.File
 import kotlin.math.asin
 import kotlin.math.cos
 import kotlin.math.ln
 import kotlin.math.sin
 import kotlin.math.sqrt
-import java.io.File
 
 class TrackingRepository(
     private val appContext: Context,
@@ -38,6 +38,12 @@ class TrackingRepository(
     private val converter: CoordinateConverter,
     private val scope: CoroutineScope
 ) {
+    data class GpsReadiness(
+        val isReady: Boolean,
+        val horizontalAccuracyM: Float?,
+        val verticalAccuracyM: Float?
+    )
+
     private data class PendingSegmentGate(
         val segmentType: SegmentType,
         val startZUpM: Double,
@@ -64,18 +70,19 @@ class TrackingRepository(
                 sensorRepository.trackingFlow().collectLatest { raw ->
                     if (!isActive) return@collectLatest
 
-                    // Drop GNSS spikes with very poor horizontal precision.
                     if (raw.horizontalAccuracyM != null && raw.horizontalAccuracyM > 120f) {
                         return@collectLatest
                     }
 
+                    val smoothedSpeedMps = smoothSpeed(raw.speedMps, raw.timestampMs)
                     val altitude = fuseAltitude(
                         pressureHpa = raw.pressureHpa,
                         gpsAltitudeM = raw.gpsAltitudeM,
-                        gpsVerticalAccuracyM = raw.gpsVerticalAccuracyM
+                        gpsVerticalAccuracyM = raw.gpsVerticalAccuracyM,
+                        speedMps = smoothedSpeedMps,
+                        accelerationMagnitude = raw.accelerationMagnitude
                     )
                     val enu = converter.toEnu(raw.latitude, raw.longitude, altitude)
-                    val smoothedSpeedMps = smoothSpeed(raw.speedMps, raw.timestampMs)
                     val classification = classifier.classify(
                         ClassificationEngine.Sample(
                             timestampMs = raw.timestampMs,
@@ -251,7 +258,9 @@ class TrackingRepository(
     private fun fuseAltitude(
         pressureHpa: Float,
         gpsAltitudeM: Double?,
-        gpsVerticalAccuracyM: Float?
+        gpsVerticalAccuracyM: Float?,
+        speedMps: Double,
+        accelerationMagnitude: Float
     ): Double {
         val baroAltitude = pressureToAltitude(pressureHpa)
 
@@ -264,9 +273,16 @@ class TrackingRepository(
         if (gpsReliable) {
             val gps = gpsAltitudeM!!
             val targetOffset = gps - relativeBaro
+            val isLiftLikeCalibrationWindow = speedMps in 1.0..4.2 && accelerationMagnitude <= 0.30f
+            val adaptationRate = when {
+                isLiftLikeCalibrationWindow -> 0.12
+                speedMps < 1.2 -> 0.08
+                else -> 0.04
+            }
+
             fusedAltitudeOffsetM = when (val existing = fusedAltitudeOffsetM) {
                 null -> targetOffset
-                else -> existing + 0.05 * (targetOffset - existing)
+                else -> existing + adaptationRate * (targetOffset - existing)
             }
         }
 
@@ -303,6 +319,18 @@ class TrackingRepository(
         return sensorRepository.currentLocationLatLon()
     }
 
+    suspend fun currentGpsReadiness(): GpsReadiness {
+        val fix = sensorRepository.currentLocationFix()
+        val horizontal = fix?.horizontalAccuracyM
+        val vertical = fix?.verticalAccuracyM
+        val ready = horizontal != null && horizontal <= 18f && (vertical == null || vertical <= 25f)
+        return GpsReadiness(
+            isReady = ready,
+            horizontalAccuracyM = horizontal,
+            verticalAccuracyM = vertical
+        )
+    }
+
     suspend fun nearestSessionPointDistanceMeters(sessionId: String, lat: Double, lon: Double): Double? {
         val points = dao.getSessionPoints(sessionId)
         if (points.isEmpty()) return null
@@ -335,6 +363,20 @@ class TrackingRepository(
                 label = label.trim()
             )
         )
+    }
+
+    suspend fun clearLocalSession(sessionId: String) {
+        dao.deleteSessionPoints(sessionId)
+        dao.deleteLiftLabels(sessionId)
+    }
+
+    suspend fun mergeLocalSessions(sourceSessionId: String, targetSessionId: String) {
+        dao.reassignSessionPoints(sourceSessionId = sourceSessionId, targetSessionId = targetSessionId)
+        dao.deleteLiftLabels(sourceSessionId)
+    }
+
+    suspend fun countLocalSessionPoints(sessionId: String): Int {
+        return dao.countSessionPoints(sessionId)
     }
 
     private fun pointToJson(point: TrackingPointEntity) = buildJsonObject {

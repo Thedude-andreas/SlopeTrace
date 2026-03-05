@@ -6,6 +6,7 @@ import android.hardware.Sensor
 import android.hardware.SensorEvent
 import android.hardware.SensorEventListener
 import android.hardware.SensorManager
+import android.location.Location
 import com.google.android.gms.location.LocationCallback
 import com.google.android.gms.location.LocationRequest
 import com.google.android.gms.location.LocationResult
@@ -41,6 +42,13 @@ class SensorRepository(
     context: Context,
     private val scope: CoroutineScope
 ) {
+    data class CurrentFix(
+        val latitude: Double,
+        val longitude: Double,
+        val horizontalAccuracyM: Float?,
+        val verticalAccuracyM: Float?
+    )
+
     private val appContext = context.applicationContext
     private val fused = LocationServices.getFusedLocationProviderClient(appContext)
     private val sensorManager = appContext.getSystemService(Context.SENSOR_SERVICE) as SensorManager
@@ -131,12 +139,18 @@ class SensorRepository(
 
     @SuppressLint("MissingPermission")
     suspend fun currentLocationLatLon(): Pair<Double, Double>? {
+        val fix = currentLocationFix() ?: return null
+        return fix.latitude to fix.longitude
+    }
+
+    @SuppressLint("MissingPermission")
+    suspend fun currentLocationFix(): CurrentFix? {
         return suspendCancellableCoroutine { continuation ->
             val cancellationTokenSource = CancellationTokenSource()
             fused.getCurrentLocation(Priority.PRIORITY_HIGH_ACCURACY, cancellationTokenSource.token)
                 .addOnSuccessListener { location ->
                     if (continuation.isActive) {
-                        continuation.resume(location?.let { it.latitude to it.longitude })
+                        continuation.resume(location?.toCurrentFix())
                     }
                 }
                 .addOnFailureListener {
@@ -149,6 +163,15 @@ class SensorRepository(
                 cancellationTokenSource.cancel()
             }
         }
+    }
+
+    private fun Location.toCurrentFix(): CurrentFix {
+        return CurrentFix(
+            latitude = latitude,
+            longitude = longitude,
+            horizontalAccuracyM = if (hasAccuracy()) accuracy else null,
+            verticalAccuracyM = if (hasVerticalAccuracy()) verticalAccuracyMeters else null
+        )
     }
 
     @SuppressLint("MissingPermission")

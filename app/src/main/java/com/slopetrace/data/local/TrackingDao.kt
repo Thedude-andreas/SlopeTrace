@@ -47,4 +47,16 @@ interface TrackingDao {
 
     @Query("SELECT * FROM lift_labels WHERE sessionId = :sessionId ORDER BY liftId ASC")
     suspend fun getLiftLabels(sessionId: String): List<LiftLabelEntity>
+
+    @Query("DELETE FROM tracking_points WHERE sessionId = :sessionId")
+    suspend fun deleteSessionPoints(sessionId: String): Int
+
+    @Query("DELETE FROM lift_labels WHERE sessionId = :sessionId")
+    suspend fun deleteLiftLabels(sessionId: String): Int
+
+    @Query("UPDATE tracking_points SET sessionId = :targetSessionId WHERE sessionId = :sourceSessionId")
+    suspend fun reassignSessionPoints(sourceSessionId: String, targetSessionId: String): Int
+
+    @Query("SELECT COUNT(*) FROM tracking_points WHERE sessionId = :sessionId")
+    suspend fun countSessionPoints(sessionId: String): Int
 }

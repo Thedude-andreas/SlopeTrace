@@ -20,6 +20,8 @@ data class RunStats(
     val maxAngleDeg: Double,
     val verticalDropMeters: Double,
     val durationSeconds: Long,
+    val movingTimeSeconds: Long,
+    val stationaryTimeSeconds: Long,
     val startTimestampMs: Long,
     val endTimestampMs: Long,
     val airtimes: List<AirtimeStats>
@@ -33,6 +35,8 @@ data class LiftStats(
     val maxSpeedMps: Double,
     val verticalGainMeters: Double,
     val durationSeconds: Long,
+    val movingTimeSeconds: Long,
+    val stationaryTimeSeconds: Long,
     val startTimestampMs: Long,
     val endTimestampMs: Long
 )
@@ -47,7 +51,11 @@ data class SessionStats(
     val totalVerticalMeters: Double,
     val totalSessionSeconds: Long,
     val liftTimeSeconds: Long,
+    val liftMovingTimeSeconds: Long,
+    val liftStationaryTimeSeconds: Long,
     val downhillTimeSeconds: Long,
+    val downhillMovingTimeSeconds: Long,
+    val downhillStationaryTimeSeconds: Long,
     val otherTimeSeconds: Long,
     val maxSessionSpeedMps: Double,
     val runs: List<RunStats>,
@@ -63,9 +71,18 @@ class StatsEngine {
         val avgSpeedMps: Double,
         val maxSpeedMps: Double,
         val verticalGainMeters: Double,
+        val movingTimeSeconds: Long,
+        val stationaryTimeSeconds: Long,
         val startTimestampMs: Long,
         val endTimestampMs: Long,
         val sampledPath: List<Pair<Double, Double>>
+    )
+
+    private data class MotionSummary(
+        val durationSeconds: Long,
+        val movingSeconds: Long,
+        val stationarySeconds: Long,
+        val distanceMeters: Double
     )
 
     fun compute(points: List<TrackingPoint>): SessionStats {
@@ -75,7 +92,11 @@ class StatsEngine {
                 totalVerticalMeters = 0.0,
                 totalSessionSeconds = 0L,
                 liftTimeSeconds = 0L,
+                liftMovingTimeSeconds = 0L,
+                liftStationaryTimeSeconds = 0L,
                 downhillTimeSeconds = 0L,
+                downhillMovingTimeSeconds = 0L,
+                downhillStationaryTimeSeconds = 0L,
                 otherTimeSeconds = 0L,
                 maxSessionSpeedMps = 0.0,
                 runs = emptyList(),
@@ -86,7 +107,11 @@ class StatsEngine {
 
         var totalVertical = 0.0
         var liftTime = 0L
+        var liftMovingTime = 0L
+        var liftStationaryTime = 0L
         var downhillTime = 0L
+        var downhillMovingTime = 0L
+        var downhillStationaryTime = 0L
 
         val runBuckets = linkedMapOf<String, MutableList<TrackingPoint>>()
         val liftBuckets = linkedMapOf<String, MutableList<TrackingPoint>>()
@@ -97,9 +122,16 @@ class StatsEngine {
             val prev = points[i - 1]
             val cur = points[i]
             val dt = ((cur.timestampMs - prev.timestampMs) / 1000L).coerceAtLeast(0L)
+            val moving = prev.speedMps >= MOVING_SPEED_THRESHOLD_MPS || cur.speedMps >= MOVING_SPEED_THRESHOLD_MPS
 
-            if (cur.segmentType == SegmentType.LIFT) liftTime += dt
-            if (cur.segmentType == SegmentType.DOWNHILL) downhillTime += dt
+            if (cur.segmentType == SegmentType.LIFT) {
+                liftTime += dt
+                if (moving) liftMovingTime += dt else liftStationaryTime += dt
+            }
+            if (cur.segmentType == SegmentType.DOWNHILL) {
+                downhillTime += dt
+                if (moving) downhillMovingTime += dt else downhillStationaryTime += dt
+            }
 
             val dz = cur.zUpM - prev.zUpM
             if (cur.segmentType == SegmentType.DOWNHILL && dz < 0) totalVertical += -dz
@@ -117,7 +149,12 @@ class StatsEngine {
 
         val rawLiftEvents = liftBuckets.mapNotNull { (liftId, lift) ->
             if (lift.size < 2) return@mapNotNull null
-            val avgSpeed = lift.map { it.speedMps }.average()
+            val motion = summarizeMotion(lift)
+            val avgSpeed = if (motion.movingSeconds > 0) {
+                motion.distanceMeters / motion.movingSeconds.toDouble()
+            } else {
+                0.0
+            }
             val maxSpeed = lift.maxOf { it.speedMps }
             var verticalGain = 0.0
             for (i in 1 until lift.size) {
@@ -130,6 +167,8 @@ class StatsEngine {
                 avgSpeedMps = avgSpeed,
                 maxSpeedMps = maxSpeed,
                 verticalGainMeters = verticalGain,
+                movingTimeSeconds = motion.movingSeconds,
+                stationaryTimeSeconds = motion.stationarySeconds,
                 startTimestampMs = lift.first().timestampMs,
                 endTimestampMs = lift.last().timestampMs,
                 sampledPath = samplePath(lift)
@@ -148,6 +187,8 @@ class StatsEngine {
                     maxSpeedMps = raw.maxSpeedMps,
                     verticalGainMeters = raw.verticalGainMeters,
                     durationSeconds = ((raw.endTimestampMs - raw.startTimestampMs) / 1000L).coerceAtLeast(0L),
+                    movingTimeSeconds = raw.movingTimeSeconds,
+                    stationaryTimeSeconds = raw.stationaryTimeSeconds,
                     startTimestampMs = raw.startTimestampMs,
                     endTimestampMs = raw.endTimestampMs
                 )
@@ -155,7 +196,12 @@ class StatsEngine {
 
         val runStats = runBuckets.mapNotNull { (runId, run) ->
             if (run.size < 2) return@mapNotNull null
-            val avgSpeed = run.map { it.speedMps }.average()
+            val motion = summarizeMotion(run)
+            val avgSpeed = if (motion.movingSeconds > 0) {
+                motion.distanceMeters / motion.movingSeconds.toDouble()
+            } else {
+                0.0
+            }
             val maxSpeed = run.maxOf { it.speedMps }
             var maxAngleDeg = 0.0
             var verticalDrop = 0.0
@@ -200,7 +246,9 @@ class StatsEngine {
                 meanAngleDeg = meanAngleDeg,
                 maxAngleDeg = maxAngleDeg,
                 verticalDropMeters = verticalDrop,
-                durationSeconds = ((endTs - startTs) / 1000L).coerceAtLeast(0L),
+                durationSeconds = motion.durationSeconds,
+                movingTimeSeconds = motion.movingSeconds,
+                stationaryTimeSeconds = motion.stationarySeconds,
                 startTimestampMs = startTs,
                 endTimestampMs = endTs,
                 airtimes = detectAirtimes(run)
@@ -227,12 +275,46 @@ class StatsEngine {
             totalVerticalMeters = totalVertical,
             totalSessionSeconds = totalSessionSeconds,
             liftTimeSeconds = liftTime,
+            liftMovingTimeSeconds = liftMovingTime,
+            liftStationaryTimeSeconds = liftStationaryTime,
             downhillTimeSeconds = downhillTime,
+            downhillMovingTimeSeconds = downhillMovingTime,
+            downhillStationaryTimeSeconds = downhillStationaryTime,
             otherTimeSeconds = otherTime,
             maxSessionSpeedMps = maxSessionSpeed,
             runs = runStats,
             lifts = liftStats,
             events = events
+        )
+    }
+
+    private fun summarizeMotion(points: List<TrackingPoint>): MotionSummary {
+        if (points.size < 2) {
+            return MotionSummary(0L, 0L, 0L, 0.0)
+        }
+
+        var movingSeconds = 0L
+        var stationarySeconds = 0L
+        var distanceMeters = 0.0
+
+        for (i in 1 until points.size) {
+            val prev = points[i - 1]
+            val cur = points[i]
+            val dt = ((cur.timestampMs - prev.timestampMs) / 1000L).coerceAtLeast(0L)
+            val dx = cur.xEastM - prev.xEastM
+            val dy = cur.yNorthM - prev.yNorthM
+            val d = sqrt(dx * dx + dy * dy)
+            distanceMeters += d
+            val moving = prev.speedMps >= MOVING_SPEED_THRESHOLD_MPS || cur.speedMps >= MOVING_SPEED_THRESHOLD_MPS
+            if (moving) movingSeconds += dt else stationarySeconds += dt
+        }
+
+        val totalDuration = ((points.last().timestampMs - points.first().timestampMs) / 1000L).coerceAtLeast(0L)
+        return MotionSummary(
+            durationSeconds = totalDuration,
+            movingSeconds = movingSeconds,
+            stationarySeconds = stationarySeconds,
+            distanceMeters = distanceMeters
         )
     }
 
@@ -375,5 +457,9 @@ class StatsEngine {
         }
 
         return airtimes
+    }
+
+    companion object {
+        private const val MOVING_SPEED_THRESHOLD_MPS = 0.8
     }
 }

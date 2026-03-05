@@ -1,6 +1,7 @@
 package com.slopetrace.domain.classification
 
 import com.slopetrace.data.model.SegmentType
+import kotlin.math.abs
 import kotlin.math.exp
 import kotlin.math.pow
 
@@ -83,7 +84,7 @@ class ClassificationEngine(
         }
 
         val confidence = (rawConfidence * qualityFactor).coerceIn(0.0, 1.0)
-        updateStableState(candidateState, sample.timestampMs)
+        updateStableState(candidateState, sample.timestampMs, avgSpeed, dzdt)
 
         return ClassificationResult(
             segmentType = stableState,
@@ -93,7 +94,16 @@ class ClassificationEngine(
         )
     }
 
-    private fun updateStableState(candidate: SegmentType, timestampMs: Long) {
+    private fun updateStableState(candidate: SegmentType, timestampMs: Long, avgSpeed: Double, dzdt: Double) {
+        if (candidate == SegmentType.UNKNOWN && stableState != SegmentType.UNKNOWN) {
+            val stationaryPause = avgSpeed < 1.0 && abs(dzdt) < 0.30
+            if (stationaryPause) {
+                pendingState = stableState
+                pendingSinceMs = timestampMs
+                return
+            }
+        }
+
         if (candidate == stableState) {
             pendingState = stableState
             pendingSinceMs = timestampMs
@@ -109,7 +119,7 @@ class ClassificationEngine(
         val requiredMs = when (candidate) {
             SegmentType.LIFT -> 6_000L
             SegmentType.DOWNHILL -> 3_000L
-            SegmentType.UNKNOWN -> 4_000L
+            SegmentType.UNKNOWN -> if (stableState == SegmentType.UNKNOWN) 4_000L else 15_000L
         }
 
         if (timestampMs - pendingSinceMs < requiredMs) return
