@@ -5,7 +5,9 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -21,17 +23,28 @@ import com.slopetrace.ui.session.SessionUiState
 @Composable
 fun Live3DScreen(
     state: SessionUiState,
+    onStartTracking: () -> Unit,
+    onStopTracking: () -> Unit,
+    onConfirmStartFarAway: () -> Unit,
+    onCancelStartFarAway: () -> Unit,
     onLeave: () -> Unit,
     onStats: () -> Unit
 ) {
     val context = LocalContext.current
     val rendererView = remember { RendererView(context) }
 
-    LaunchedEffect(state.points) {
+    LaunchedEffect(state.remoteTrailsByUser, state.points, state.userId) {
+        val trails = state.remoteTrailsByUser.mapValues { (_, points) ->
+            points.map { point ->
+                floatArrayOf(point.x.toFloat(), point.y.toFloat(), point.z.toFloat())
+            }
+        }
+
         val localPoints = state.points.map {
             floatArrayOf(it.xEastM.toFloat(), it.yNorthM.toFloat(), it.zUpM.toFloat())
         }
-        rendererView.updateTrail(state.userId, localPoints)
+
+        rendererView.replaceTrails(trails + (state.userId to localPoints))
     }
 
     Column(
@@ -56,8 +69,39 @@ fun Live3DScreen(
             factory = { rendererView }
         )
         Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            Button(onClick = onStats) { Text("View Stats") }
-            Button(onClick = onLeave) { Text("Leave Session") }
+            Button(
+                onClick = {
+                    if (state.isTrackingActive) onStopTracking() else onStartTracking()
+                },
+                enabled = !state.isLoading
+            ) {
+                Text(if (state.isTrackingActive) "Stop Tracking" else "Start Tracking")
+            }
+            Button(onClick = onStats, enabled = !state.isLoading) { Text("View Stats") }
+            Button(onClick = onLeave, enabled = !state.isLoading) { Text("Leave Session") }
+        }
+
+        val farDistanceMeters = state.pendingStartDistanceMeters
+        if (farDistanceMeters != null) {
+            AlertDialog(
+                onDismissRequest = onCancelStartFarAway,
+                title = { Text("Bekräfta start av spårning") },
+                text = {
+                    Text(
+                        "Du är cirka ${farDistanceMeters.toInt()} m från närmaste tidigare punkt i sessionen. Vill du ändå starta spårning här?"
+                    )
+                },
+                confirmButton = {
+                    TextButton(onClick = onConfirmStartFarAway) {
+                        Text("Starta ändå")
+                    }
+                },
+                dismissButton = {
+                    TextButton(onClick = onCancelStartFarAway) {
+                        Text("Avbryt")
+                    }
+                }
+            )
         }
     }
 }

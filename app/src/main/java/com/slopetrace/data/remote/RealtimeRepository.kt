@@ -4,6 +4,7 @@ import android.content.Intent
 import com.slopetrace.BuildConfig
 import com.slopetrace.data.local.TrackingDao
 import com.slopetrace.data.model.PositionStreamItem
+import com.slopetrace.data.model.Session
 import com.slopetrace.data.model.SegmentType
 import io.github.jan.supabase.createSupabaseClient
 import io.github.jan.supabase.gotrue.Auth
@@ -74,18 +75,56 @@ class RealtimeRepository(
             ?: error("Inte inloggad. Logga in innan du går med i en session.")
     }
 
-    suspend fun ensureSessionMembership(sessionId: String): String {
+    fun currentUserIdOrNull(): String? {
+        return client.auth.currentUserOrNull()?.id
+    }
+
+    suspend fun listSessions(): List<Session> {
+        val sessions = client.postgrest["sessions"]
+            .select()
+            .decodeList<JsonObject>()
+
+        return sessions.mapNotNull { row ->
+            val id = row["id"]?.jsonPrimitive?.contentOrNull ?: return@mapNotNull null
+            val name = row["name"]?.jsonPrimitive?.contentOrNull ?: "Session $id"
+            val startRaw = row["start_time"]?.jsonPrimitive?.contentOrNull ?: return@mapNotNull null
+            val endRaw = row["end_time"]?.jsonPrimitive?.contentOrNull
+
+            runCatching {
+                Session(
+                    id = id,
+                    name = name,
+                    startTime = Instant.parse(startRaw),
+                    endTime = endRaw?.let { Instant.parse(it) }
+                )
+            }.getOrNull()
+        }.sortedByDescending { it.startTime }
+    }
+
+    suspend fun createSession(name: String): Session {
+        val sessionName = name.trim().ifEmpty { "Slope session" }
+        val id = UUID.randomUUID().toString()
+        val now = Clock.System.now()
+
+        client.postgrest["sessions"].insert(
+            value = buildJsonObject {
+                put("id", id)
+                put("name", sessionName)
+                put("start_time", now.toString())
+            }
+        )
+
+        return Session(
+            id = id,
+            name = sessionName,
+            startTime = now,
+            endTime = null
+        )
+    }
+
+    suspend fun joinSession(sessionId: String): String {
         val normalizedSessionId = normalizeSessionId(sessionId)
         val userId = requireCurrentUserId()
-
-        client.postgrest["sessions"].upsert(
-            value = buildJsonObject {
-                put("id", normalizedSessionId)
-                put("name", "Slope session ${normalizedSessionId.take(8)}")
-            },
-            onConflict = "id",
-            ignoreDuplicates = true
-        )
 
         client.postgrest["session_members"].upsert(
             value = buildJsonObject {
@@ -98,6 +137,44 @@ class RealtimeRepository(
         )
 
         return normalizedSessionId
+    }
+
+    suspend fun fetchSessionTrails(sessionId: String): Map<String, List<PositionStreamItem>> {
+        val rows = client.postgrest["position_stream"]
+            .select {
+                filter {
+                    eq("session_id", sessionId)
+                }
+            }
+            .decodeList<JsonObject>()
+
+        val points = rows.mapNotNull { row ->
+            val userId = row["user_id"]?.jsonPrimitive?.contentOrNull ?: return@mapNotNull null
+            val rawSessionId = row["session_id"]?.jsonPrimitive?.contentOrNull ?: return@mapNotNull null
+            val rawTimestamp = row["timestamp"]?.jsonPrimitive?.contentOrNull ?: return@mapNotNull null
+            val segmentRaw = row["segment_type"]?.jsonPrimitive?.contentOrNull ?: return@mapNotNull null
+            val x = row["x"]?.jsonPrimitive?.contentOrNull?.toDoubleOrNull() ?: return@mapNotNull null
+            val y = row["y"]?.jsonPrimitive?.contentOrNull?.toDoubleOrNull() ?: return@mapNotNull null
+            val z = row["z"]?.jsonPrimitive?.contentOrNull?.toDoubleOrNull() ?: return@mapNotNull null
+            val speed = row["speed"]?.jsonPrimitive?.contentOrNull?.toDoubleOrNull() ?: 0.0
+
+            runCatching {
+                PositionStreamItem(
+                    userId = userId,
+                    sessionId = rawSessionId,
+                    timestamp = Instant.parse(rawTimestamp),
+                    x = x,
+                    y = y,
+                    z = z,
+                    speed = speed,
+                    segmentType = SegmentType.valueOf(segmentRaw.uppercase())
+                )
+            }.getOrNull()
+        }
+
+        return points
+            .sortedBy { it.timestamp }
+            .groupBy { it.userId }
     }
 
     suspend fun logout() {

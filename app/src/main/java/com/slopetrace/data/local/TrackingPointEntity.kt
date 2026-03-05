@@ -20,5 +20,8 @@ data class TrackingPointEntity(
     val yNorthM: Double,
     val zUpM: Double,
     val segmentType: SegmentType,
+    val segmentConfidence: Double,
+    val runId: String?,
+    val liftId: String?,
     val synced: Boolean = false
 )

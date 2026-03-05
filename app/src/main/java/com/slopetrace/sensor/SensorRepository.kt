@@ -11,6 +11,7 @@ import com.google.android.gms.location.LocationRequest
 import com.google.android.gms.location.LocationResult
 import com.google.android.gms.location.LocationServices
 import com.google.android.gms.location.Priority
+import com.google.android.gms.tasks.CancellationTokenSource
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.channels.awaitClose
@@ -20,13 +21,18 @@ import kotlinx.coroutines.flow.callbackFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.datetime.Clock
+import kotlin.coroutines.resume
 
 data class SensorSnapshot(
     val timestampMs: Long,
     val latitude: Double,
     val longitude: Double,
     val speedMps: Double,
+    val horizontalAccuracyM: Float?,
+    val gpsAltitudeM: Double?,
+    val gpsVerticalAccuracyM: Float?,
     val pressureHpa: Float,
     val accelerationMagnitude: Float
 )
@@ -106,14 +112,42 @@ class SensorRepository(
         }
 
         return combine(locationFlow, pressureFlow, accelerationFlow) { location, pressure, acc ->
+            val horizontalAccuracy = if (location.hasAccuracy()) location.accuracy else null
+            val gpsAltitude = if (location.hasAltitude()) location.altitude else null
+            val verticalAccuracy = if (location.hasVerticalAccuracy()) location.verticalAccuracyMeters else null
             SensorSnapshot(
                 timestampMs = location.time.takeIf { it > 0 } ?: Clock.System.now().toEpochMilliseconds(),
                 latitude = location.latitude,
                 longitude = location.longitude,
                 speedMps = location.speed.toDouble().coerceAtLeast(0.0),
+                horizontalAccuracyM = horizontalAccuracy,
+                gpsAltitudeM = gpsAltitude,
+                gpsVerticalAccuracyM = verticalAccuracy,
                 pressureHpa = pressure,
                 accelerationMagnitude = acc
             )
+        }
+    }
+
+    @SuppressLint("MissingPermission")
+    suspend fun currentLocationLatLon(): Pair<Double, Double>? {
+        return suspendCancellableCoroutine { continuation ->
+            val cancellationTokenSource = CancellationTokenSource()
+            fused.getCurrentLocation(Priority.PRIORITY_HIGH_ACCURACY, cancellationTokenSource.token)
+                .addOnSuccessListener { location ->
+                    if (continuation.isActive) {
+                        continuation.resume(location?.let { it.latitude to it.longitude })
+                    }
+                }
+                .addOnFailureListener {
+                    if (continuation.isActive) {
+                        continuation.resume(null)
+                    }
+                }
+
+            continuation.invokeOnCancellation {
+                cancellationTokenSource.cancel()
+            }
         }
     }
 

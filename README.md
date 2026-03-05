@@ -1,30 +1,49 @@
 # SlopeTrace (Android, Kotlin)
 
-MVP ski tracking app scaffold with local sensor fusion, rule-based segment classification, ENU conversion, Supabase realtime sync, and live 3D track rendering.
+Ski tracking app for alpine sessions with sensor fusion, 3D trail rendering, event-based stats, and Supabase-backed session sharing.
+
+## Current Capabilities
+
+- Session flow:
+  - Create session with default `yyyy-MM-dd HH:mm` name.
+  - Join existing sessions from dropdown (latest first).
+  - Start/stop tracking explicitly (tracking does not auto-start on join).
+- Live tracking:
+  - GPS + barometer + accelerometer ingestion.
+  - Smoothed speed and fused altitude.
+  - Background-capable foreground service tracking.
+- Segment classification:
+  - `LIFT`, `DOWNHILL`, `UNKNOWN` state machine with hysteresis and confidence.
+  - Z-gate to reduce false positives:
+    - `LIFT` confirmed after +10m ascent.
+    - `DOWNHILL` confirmed after -10m descent.
+    - First 10m are backfilled once confirmed.
+- 3D view:
+  - Multi-user trail rendering.
+  - Grid floor at minimum recorded Z.
+  - Camera rotate + pinch zoom.
+- Stats:
+  - Session totals (runs, lift/downhill/other time, max session speed).
+  - Event feed for each lift and downhill.
+  - Downhill metrics include fall height, avg/max speed, duration, mean/max angle, and airtime events.
+- Physical lift grouping:
+  - Lift rides are clustered into physical lifts if paths are within 20m for >=80% of both paths.
+  - Physical lift names can be edited and reused across matching rides in the session.
+- Data export:
+  - On leave session, local points are exported to JSON for later model/rule tuning.
+  - Export path is shown in session screen.
 
 ## Project Structure
 
 - `app/src/main/java/com/slopetrace/sensor` - sensor + fused location ingestion
-- `app/src/main/java/com/slopetrace/tracking` - local tracking pipeline and storage
-- `app/src/main/java/com/slopetrace/domain/classification` - 5s sliding-window segment classifier
+- `app/src/main/java/com/slopetrace/tracking` - tracking pipeline, gates, export, active session store
+- `app/src/main/java/com/slopetrace/domain/classification` - sliding-window segment classifier
+- `app/src/main/java/com/slopetrace/domain/stats` - event-based stats engine + physical lift clustering
 - `app/src/main/java/com/slopetrace/domain/coords` - WGS84 to local ENU conversion
 - `app/src/main/java/com/slopetrace/data/local` - Room entities and DAO
 - `app/src/main/java/com/slopetrace/data/remote` - Supabase auth/realtime/persistence integration
 - `app/src/main/java/com/slopetrace/render` - OpenGL ES renderer host
 - `app/src/main/java/com/slopetrace/ui` - Compose screens (login, session, live, stats)
-
-## MVP Features Included
-
-1. GPS + barometer sensor capture with dynamic sampling (0.5-5 Hz behavior).
-2. Local-only rule-based segment classification (`LIFT`, `DOWNHILL`, `UNKNOWN`).
-3. ENU conversion from first point origin.
-4. Supabase auth (`sign in`/`sign up`) + realtime channel + offline pending sync queue.
-5. Session-local 3D trail renderer host (`GLSurfaceView`) and live line growth hooks.
-6. Session statistics engine for runs, vertical, times, speed, slope.
-7. MVVM architecture around `SessionViewModel`.
-8. Foreground tracking service start/stop based on active session.
-9. Runtime location-permission flow before session join/live.
-10. Auth deeplink handling for `slopetrace://auth`.
 
 ## Supabase Setup
 
@@ -35,23 +54,31 @@ MVP ski tracking app scaffold with local sensor fusion, rule-based segment class
 3. Ensure email auth is enabled in Supabase Auth settings.
 4. Enable realtime for table `position_stream`.
 5. Configure auth URLs:
-   - `Authentication -> URL Configuration -> Site URL`: set a real URL (not localhost).
+   - `Authentication -> URL Configuration -> Site URL`: set a real URL.
    - `Authentication -> URL Configuration -> Redirect URLs`: include `slopetrace://auth`.
-6. If policies already exist, drop/recreate affected policies before rerunning schema.
 
-### Important Session Rules
+## Permissions and Background
 
-- Session ID must be a valid UUID.
-- `Create new` generates a UUID and attempts to create/join session membership.
-- Sync writes are scoped per active session and preserve original point timestamp.
+- Required runtime permissions:
+  - Foreground location (`ACCESS_FINE_LOCATION` or `ACCESS_COARSE_LOCATION`)
+  - Background location (`ACCESS_BACKGROUND_LOCATION`, Android 10+)
+- Tracking in background depends on device battery policy; whitelist app from aggressive battery optimization where possible.
 
-## Auth and Recovery Notes
+## Data Export
 
-- If `Email confirmation` is enabled, users must verify before login.
-- Recovery links require a valid redirect target; localhost links fail on real devices.
-- The app handles deeplink auth intents via `slopetrace://auth`.
+Session exports are written to:
 
-## Build Notes
+- `Android/data/com.slopetrace/files/Documents/session_exports/`
 
-- Build and run via Android Studio.
-- If build cache is stale after dependency/config changes, run `Sync Project with Gradle Files` then `Clean Project`.
+Each file contains raw point history and derived fields (ENU, segment, confidence, run/lift ids) for offline analysis.
+
+## Build and Test
+
+- Build debug APK:
+  - `./gradlew assembleDebug`
+- Unit tests:
+  - `./gradlew testDebugUnitTest`
+
+If Gradle/Kotlin incremental cache gets stale, run:
+
+- `./gradlew clean`

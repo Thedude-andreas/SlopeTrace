@@ -10,14 +10,41 @@ import kotlinx.coroutines.flow.Flow
 interface TrackingDao {
 
     @Insert(onConflict = OnConflictStrategy.REPLACE)
-    suspend fun insertPoint(point: TrackingPointEntity)
+    suspend fun insertPoint(point: TrackingPointEntity): Long
 
     @Query("SELECT * FROM tracking_points WHERE sessionId = :sessionId ORDER BY timestampMs ASC")
     fun streamSessionPoints(sessionId: String): Flow<List<TrackingPointEntity>>
 
+    @Query("SELECT * FROM tracking_points WHERE sessionId = :sessionId ORDER BY timestampMs ASC")
+    suspend fun getSessionPoints(sessionId: String): List<TrackingPointEntity>
+
     @Query("SELECT * FROM tracking_points WHERE synced = 0 AND sessionId = :sessionId ORDER BY timestampMs ASC LIMIT :limit")
-    suspend fun pendingSync(sessionId: String, limit: Int = 500): List<TrackingPointEntity>
+    suspend fun pendingSync(sessionId: String, limit: Int): List<TrackingPointEntity>
 
     @Query("UPDATE tracking_points SET synced = 1 WHERE id IN (:ids)")
-    suspend fun markSynced(ids: List<Long>)
+    suspend fun markSynced(ids: List<Long>): Int
+
+    @Query(
+        """
+        UPDATE tracking_points
+        SET segmentType = :segmentType,
+            segmentConfidence = :segmentConfidence,
+            runId = :runId,
+            liftId = :liftId
+        WHERE id IN (:ids)
+        """
+    )
+    suspend fun updateSegmentsForIds(
+        ids: List<Long>,
+        segmentType: com.slopetrace.data.model.SegmentType,
+        segmentConfidence: Double,
+        runId: String?,
+        liftId: String?
+    ): Int
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun upsertLiftLabel(label: LiftLabelEntity): Long
+
+    @Query("SELECT * FROM lift_labels WHERE sessionId = :sessionId ORDER BY liftId ASC")
+    suspend fun getLiftLabels(sessionId: String): List<LiftLabelEntity>
 }

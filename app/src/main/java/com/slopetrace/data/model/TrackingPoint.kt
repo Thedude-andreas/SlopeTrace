@@ -13,5 +13,8 @@ data class TrackingPoint(
     val xEastM: Double,
     val yNorthM: Double,
     val zUpM: Double,
-    val segmentType: SegmentType
+    val segmentType: SegmentType,
+    val segmentConfidence: Double,
+    val runId: String?,
+    val liftId: String?
 )
