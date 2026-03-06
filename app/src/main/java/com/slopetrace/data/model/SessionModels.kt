@@ -18,7 +18,12 @@ data class Session(
     val id: String,
     val name: String,
     val startTime: Instant,
-    val endTime: Instant? = null
+    val endTime: Instant? = null,
+    val createdBy: String? = null,
+    val isPublic: Boolean = false,
+    val latitude: Double? = null,
+    val longitude: Double? = null,
+    val distanceMeters: Double? = null
 )
 
 data class PositionStreamItem(

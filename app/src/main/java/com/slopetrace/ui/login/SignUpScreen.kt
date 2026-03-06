@@ -2,13 +2,11 @@ package com.slopetrace.ui.login
 
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.Button
-import androidx.compose.material3.Checkbox
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
@@ -29,17 +27,16 @@ import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.launch
 
 @Composable
-fun LoginScreen(
-    onLogin: suspend (String, String) -> Boolean,
-    rememberMe: Boolean,
-    onRememberMeChange: (Boolean) -> Unit,
-    onNavigateSignUp: () -> Unit,
+fun SignUpScreen(
+    onSignUp: suspend (String, String, String) -> Boolean,
+    onNavigateBackToLogin: () -> Unit,
     onSuccessNavigate: () -> Unit,
     errorMessage: String?,
     isLoading: Boolean
 ) {
     var email by remember { mutableStateOf("") }
     var password by remember { mutableStateOf("") }
+    var alias by remember { mutableStateOf("") }
     val scope = rememberCoroutineScope()
 
     Column(
@@ -48,7 +45,21 @@ fun LoginScreen(
             .padding(16.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
-        Text("SlopeTrace Login")
+        Text("Create Account")
+
+        OutlinedTextField(
+            value = alias,
+            onValueChange = { alias = it },
+            label = { Text("Alias") },
+            enabled = !isLoading,
+            singleLine = true,
+            keyboardOptions = KeyboardOptions(
+                capitalization = KeyboardCapitalization.Words,
+                imeAction = ImeAction.Next,
+                autoCorrectEnabled = true
+            ),
+            modifier = Modifier.fillMaxWidth()
+        )
 
         OutlinedTextField(
             value = email,
@@ -88,20 +99,11 @@ fun LoginScreen(
             )
         }
 
-        Row {
-            Checkbox(
-                checked = rememberMe,
-                onCheckedChange = { checked -> onRememberMeChange(checked) },
-                enabled = !isLoading
-            )
-            Text("Remember me", modifier = Modifier.padding(top = 12.dp))
-        }
-
         Button(
-            enabled = !isLoading,
+            enabled = !isLoading && alias.trim().isNotEmpty(),
             onClick = {
                 scope.launch {
-                    if (onLogin(email.trim(), password)) {
+                    if (onSignUp(email.trim(), password, alias.trim())) {
                         onSuccessNavigate()
                     }
                 }
@@ -110,12 +112,12 @@ fun LoginScreen(
             if (isLoading) {
                 CircularProgressIndicator(strokeWidth = 2.dp)
             } else {
-                Text("Sign in")
+                Text("Sign up")
             }
         }
 
-        TextButton(onClick = onNavigateSignUp, enabled = !isLoading) {
-            Text("Create account")
+        TextButton(onClick = onNavigateBackToLogin, enabled = !isLoading) {
+            Text("Back to login")
         }
     }
 }

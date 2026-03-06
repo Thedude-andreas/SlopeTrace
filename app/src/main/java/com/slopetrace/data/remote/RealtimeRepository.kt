@@ -35,6 +35,10 @@ import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.put
 import kotlinx.serialization.json.jsonPrimitive
 import java.util.UUID
+import kotlin.math.asin
+import kotlin.math.cos
+import kotlin.math.sin
+import kotlin.math.sqrt
 
 /**
  * MVP repository for Supabase auth + session scoped realtime sharing.
@@ -88,32 +92,25 @@ class RealtimeRepository(
             .decodeList<JsonObject>()
 
         return sessions.mapNotNull { row ->
-            val id = row["id"]?.jsonPrimitive?.contentOrNull ?: return@mapNotNull null
-            val name = row["name"]?.jsonPrimitive?.contentOrNull ?: "Session $id"
-            val startRaw = row["start_time"]?.jsonPrimitive?.contentOrNull ?: return@mapNotNull null
-            val endRaw = row["end_time"]?.jsonPrimitive?.contentOrNull
-
-            runCatching {
-                Session(
-                    id = id,
-                    name = name,
-                    startTime = Instant.parse(startRaw),
-                    endTime = endRaw?.let { Instant.parse(it) }
-                )
-            }.getOrNull()
+            row.toSessionOrNull()
         }.sortedByDescending { it.startTime }
     }
 
-    suspend fun createSession(name: String): Session {
+    suspend fun createSession(name: String, isPublic: Boolean, latitude: Double?, longitude: Double?): Session {
         val sessionName = name.trim().ifEmpty { "Slope session" }
         val id = UUID.randomUUID().toString()
         val now = Clock.System.now()
+        val userId = requireCurrentUserId()
 
         client.postgrest["sessions"].insert(
             value = buildJsonObject {
                 put("id", id)
                 put("name", sessionName)
                 put("start_time", now.toString())
+                put("created_by", userId)
+                put("is_public", isPublic)
+                if (latitude != null) put("latitude", latitude)
+                if (longitude != null) put("longitude", longitude)
             }
         )
 
@@ -121,8 +118,70 @@ class RealtimeRepository(
             id = id,
             name = sessionName,
             startTime = now,
-            endTime = null
+            endTime = null,
+            createdBy = userId,
+            isPublic = isPublic,
+            latitude = latitude,
+            longitude = longitude
         )
+    }
+
+    suspend fun listOwnSessions(): List<Session> {
+        val currentUserId = requireCurrentUserId()
+        val rows = client.postgrest["sessions"]
+            .select {
+                filter {
+                    eq("created_by", currentUserId)
+                }
+            }
+            .decodeList<JsonObject>()
+
+        return rows.mapNotNull { it.toSessionOrNull() }
+            .sortedByDescending { it.startTime }
+    }
+
+    suspend fun listNearbyPublicSessions(
+        latitude: Double,
+        longitude: Double,
+        radiusMeters: Double,
+        excludeUserId: String
+    ): List<Session> {
+        val rpcRows = runCatching {
+            client.postgrest.rpc(
+                function = "list_nearby_public_sessions",
+                parameters = buildJsonObject {
+                    put("p_lat", latitude)
+                    put("p_lon", longitude)
+                    put("p_radius_m", radiusMeters)
+                }
+            ).decodeList<JsonObject>()
+        }.getOrNull()
+
+        if (rpcRows != null) {
+            return rpcRows.mapNotNull { row ->
+                val base = row.toSessionOrNull() ?: return@mapNotNull null
+                val distance = row["distance_m"]?.jsonPrimitive?.contentOrNull?.toDoubleOrNull()
+                base.copy(distanceMeters = distance)
+            }.filter { it.createdBy != excludeUserId }
+                .sortedBy { it.distanceMeters ?: Double.MAX_VALUE }
+        }
+
+        val sessions = client.postgrest["sessions"]
+            .select {
+                filter {
+                    eq("is_public", true)
+                    neq("created_by", excludeUserId)
+                }
+            }
+            .decodeList<JsonObject>()
+            .mapNotNull { row -> row.toSessionOrNull() }
+
+        return sessions.mapNotNull { session ->
+            val lat = session.latitude ?: return@mapNotNull null
+            val lon = session.longitude ?: return@mapNotNull null
+            val distance = haversineMeters(latitude, longitude, lat, lon)
+            if (distance <= radiusMeters) session.copy(distanceMeters = distance) else null
+        }.sortedBy { it.distanceMeters ?: Double.MAX_VALUE }
     }
 
     suspend fun createMergedSessionFromSources(sourceSessionIds: List<String>, mergedName: String): Session {
@@ -369,6 +428,45 @@ class RealtimeRepository(
             error("Session ID must be a valid UUID, for example 123e4567-e89b-12d3-a456-426614174000")
         }
     }
+
+    private fun JsonObject.toSessionOrNull(): Session? {
+        val id = this["id"]?.jsonPrimitive?.contentOrNull ?: return null
+        val name = this["name"]?.jsonPrimitive?.contentOrNull ?: "Session $id"
+        val startRaw = this["start_time"]?.jsonPrimitive?.contentOrNull ?: return null
+        val endRaw = this["end_time"]?.jsonPrimitive?.contentOrNull
+        val createdBy = this["created_by"]?.jsonPrimitive?.contentOrNull
+        val isPublic = this["is_public"]?.jsonPrimitive?.contentOrNull?.toBooleanStrictOrNull() ?: false
+        val latitude = this["latitude"]?.jsonPrimitive?.contentOrNull?.toDoubleOrNull()
+        val longitude = this["longitude"]?.jsonPrimitive?.contentOrNull?.toDoubleOrNull()
+
+        return runCatching {
+            Session(
+                id = id,
+                name = name,
+                startTime = Instant.parse(startRaw),
+                endTime = endRaw?.let { Instant.parse(it) },
+                createdBy = createdBy,
+                isPublic = isPublic,
+                latitude = latitude,
+                longitude = longitude
+            )
+        }.getOrNull()
+    }
+
+    private fun haversineMeters(lat1: Double, lon1: Double, lat2: Double, lon2: Double): Double {
+        val earthRadius = 6_371_000.0
+        val dLat = Math.toRadians(lat2 - lat1)
+        val dLon = Math.toRadians(lon2 - lon1)
+        val lat1Rad = Math.toRadians(lat1)
+        val lat2Rad = Math.toRadians(lat2)
+
+        val a = sin(dLat / 2).pow2() +
+            cos(lat1Rad) * cos(lat2Rad) * sin(dLon / 2).pow2()
+        val c = 2 * asin(sqrt(a))
+        return earthRadius * c
+    }
+
+    private fun Double.pow2(): Double = this * this
 
     private fun defaultColorForUser(userId: String): String {
         val palette = listOf("#60A5FA", "#F97316", "#22C55E", "#E879F9", "#FBBF24", "#14B8A6", "#FB7185")

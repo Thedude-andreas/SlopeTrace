@@ -2,6 +2,7 @@ package com.slopetrace.ui.live
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
@@ -11,17 +12,13 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Checkbox
-import androidx.compose.material3.DropdownMenu
-import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
@@ -32,6 +29,8 @@ import com.slopetrace.render.RenderTrailPoint
 import com.slopetrace.render.RendererView
 import com.slopetrace.ui.session.SessionUiState
 import com.slopetrace.ui.theme.AppPalette
+import kotlinx.datetime.Clock
+import kotlin.math.sqrt
 
 @Composable
 fun Live3DScreen(
@@ -47,24 +46,13 @@ fun Live3DScreen(
     val context = LocalContext.current
     val rendererView = remember { RendererView(context) }
     val userVisibility = remember { mutableStateMapOf<String, Boolean>() }
-    var showFilterMenu by remember { androidx.compose.runtime.mutableStateOf(false) }
 
     val allUsers = remember(state.remoteTrailsByUser, state.userId) {
         (state.remoteTrailsByUser.keys + state.userId).distinct().sorted()
     }
 
-    LaunchedEffect(allUsers) {
-        allUsers.forEach { userId ->
-            if (!userVisibility.containsKey(userId)) {
-                userVisibility[userId] = true
-            }
-        }
-        val removedKeys = userVisibility.keys.filter { it !in allUsers }
-        removedKeys.forEach { userVisibility.remove(it) }
-    }
-
-    LaunchedEffect(state.remoteTrailsByUser, state.points, state.userId, state.rawToPhysicalLiftId, userVisibility.toMap(), state.userProfiles) {
-        val localTrail = state.points.map { point ->
+    val localTrail = remember(state.points, state.rawToPhysicalLiftId) {
+        state.points.map { point ->
             val physicalLiftId = point.liftId?.let { raw -> state.rawToPhysicalLiftId[raw] ?: raw }
             RenderTrailPoint(
                 x = point.xEastM.toFloat(),
@@ -73,8 +61,10 @@ fun Live3DScreen(
                 rgba = AppPalette.toGlRgba(AppPalette.segmentColor(point.segmentType, physicalLiftId))
             )
         }
+    }
 
-        val remoteTrails = state.remoteTrailsByUser.mapValues { (_, points) ->
+    val remoteTrails = remember(state.remoteTrailsByUser) {
+        state.remoteTrailsByUser.mapValues { (_, points) ->
             points.map { point ->
                 RenderTrailPoint(
                     x = point.x.toFloat(),
@@ -89,13 +79,70 @@ fun Live3DScreen(
                 )
             }
         }
+    }
 
-        val fullTrailsByUser = remoteTrails + (state.userId to localTrail)
+    val fullTrailsByUser = remember(remoteTrails, state.userId, localTrail) {
+        remoteTrails + (state.userId to localTrail)
+    }
+
+    val latestRemoteByUser = remember(state.remoteTrailsByUser) {
+        state.remoteTrailsByUser.mapValues { (_, points) -> points.lastOrNull() }
+    }
+
+    val latestByUser = remember(latestRemoteByUser, state.userId, localTrail, state.points) {
+        buildMap {
+            latestRemoteByUser.forEach { (userId, point) ->
+                if (point != null) {
+                    put(userId, LivePoint(point.x, point.y, point.z, point.speed, point.timestamp.toEpochMilliseconds()))
+                }
+            }
+            val localLast = state.points.lastOrNull()
+            if (localLast != null) {
+                put(
+                    state.userId,
+                    LivePoint(
+                        x = localLast.xEastM,
+                        y = localLast.yNorthM,
+                        z = localLast.zUpM,
+                        speedMps = localLast.speedMps,
+                        timestampMs = localLast.timestampMs
+                    )
+                )
+            }
+        }
+    }
+
+    val trackingActiveUserIds = remember(latestByUser, state.userId, state.isTrackingActive, state.points) {
+        val nowMs = Clock.System.now().toEpochMilliseconds()
+        val activeWindowMs = 20_000L
+        latestByUser.filter { (userId, point) ->
+            if (userId == state.userId) {
+                state.isTrackingActive && state.points.isNotEmpty()
+            } else {
+                nowMs - point.timestampMs <= activeWindowMs
+            }
+        }.keys
+    }
+
+    LaunchedEffect(allUsers) {
+        allUsers.forEach { userId ->
+            if (!userVisibility.containsKey(userId)) {
+                userVisibility[userId] = true
+            }
+        }
+        val removedKeys = userVisibility.keys.filter { it !in allUsers }
+        removedKeys.forEach { userVisibility.remove(it) }
+    }
+
+    LaunchedEffect(fullTrailsByUser, latestByUser, trackingActiveUserIds, userVisibility.toMap(), state.userProfiles) {
         val trailsByUser = fullTrailsByUser.filter { (userId, _) -> userVisibility[userId] != false }
-        val currentPositionsByUser = trailsByUser.mapNotNull { (userId, points) ->
-            val last = points.lastOrNull() ?: return@mapNotNull null
-            userId to floatArrayOf(last.x, last.y, last.z)
-        }.toMap()
+        val currentPositionsByUser = trackingActiveUserIds
+            .filter { userId -> userVisibility[userId] != false }
+            .mapNotNull { userId ->
+                val last = latestByUser[userId] ?: return@mapNotNull null
+                userId to floatArrayOf(last.x.toFloat(), last.y.toFloat(), last.z.toFloat())
+            }
+            .toMap()
 
         val userColorById = trailsByUser.keys.associateWith { userId ->
             AppPalette.toGlRgba(profileColor(state.userProfiles[userId], userId))
@@ -107,6 +154,8 @@ fun Live3DScreen(
             userColorById = userColorById
         )
     }
+
+    val localLastPoint = latestByUser[state.userId]
 
     Column(
         modifier = Modifier.fillMaxSize(),
@@ -131,39 +180,6 @@ fun Live3DScreen(
             )
         }
 
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 12.dp),
-            horizontalArrangement = Arrangement.spacedBy(8.dp)
-        ) {
-            Button(onClick = { showFilterMenu = true }, enabled = allUsers.isNotEmpty()) {
-                Text("Filter users")
-            }
-            DropdownMenu(expanded = showFilterMenu, onDismissRequest = { showFilterMenu = false }) {
-                allUsers.forEach { userId ->
-                    val profile = state.userProfiles[userId]
-                    DropdownMenuItem(
-                        text = {
-                            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                                Text(aliasFor(profile, userId))
-                            }
-                        },
-                        leadingIcon = {
-                            Checkbox(
-                                checked = userVisibility[userId] != false,
-                                onCheckedChange = null
-                            )
-                        },
-                        onClick = {
-                            val current = userVisibility[userId] != false
-                            userVisibility[userId] = !current
-                        }
-                    )
-                }
-            }
-        }
-
         Column(
             modifier = Modifier
                 .fillMaxWidth()
@@ -173,13 +189,32 @@ fun Live3DScreen(
             Text("Legend", style = MaterialTheme.typography.labelLarge)
             allUsers.forEach { userId ->
                 val profile = state.userProfiles[userId]
+                val latest = latestByUser[userId]
+                val isActive = userId in trackingActiveUserIds
+                val speedKmh = if (isActive) latest?.speedMps?.times(3.6) else null
+                val distanceM = if (isActive && localLastPoint != null && latest != null && userId != state.userId) {
+                    distanceMeters(localLastPoint, latest)
+                } else {
+                    null
+                }
+                val status = if (isActive) "active" else "inactive"
+
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    androidx.compose.foundation.layout.Box(
+                    Checkbox(
+                        checked = userVisibility[userId] != false,
+                        onCheckedChange = { checked ->
+                            userVisibility[userId] = checked
+                        }
+                    )
+                    Box(
                         modifier = Modifier
                             .size(12.dp)
                             .background(profileColor(profile, userId))
                     )
-                    Text(aliasFor(profile, userId))
+                    Text(
+                        "${aliasFor(profile, userId)} ($status) | ${speedKmh?.let { "%.1f km/h".format(it) } ?: "-"} | " +
+                            "${distanceM?.let { "%.0f m".format(it) } ?: "-"}"
+                    )
                 }
             }
         }
@@ -244,6 +279,21 @@ fun Live3DScreen(
             )
         }
     }
+}
+
+private data class LivePoint(
+    val x: Double,
+    val y: Double,
+    val z: Double,
+    val speedMps: Double,
+    val timestampMs: Long
+)
+
+private fun distanceMeters(a: LivePoint, b: LivePoint): Double {
+    val dx = a.x - b.x
+    val dy = a.y - b.y
+    val dz = a.z - b.z
+    return sqrt(dx * dx + dy * dy + dz * dz)
 }
 
 private fun aliasFor(profile: UserProfile?, userId: String): String {

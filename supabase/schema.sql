@@ -10,9 +10,18 @@ create table if not exists users_profile (
 create table if not exists sessions (
   id uuid primary key default gen_random_uuid(),
   name text not null,
+  created_by uuid not null references auth.users(id) on delete cascade default auth.uid(),
+  is_public boolean not null default false,
+  latitude double precision,
+  longitude double precision,
   start_time timestamptz not null default now(),
   end_time timestamptz
 );
+
+alter table sessions add column if not exists created_by uuid references auth.users(id) on delete cascade default auth.uid();
+alter table sessions add column if not exists is_public boolean not null default false;
+alter table sessions add column if not exists latitude double precision;
+alter table sessions add column if not exists longitude double precision;
 
 create table if not exists session_members (
   session_id uuid not null references sessions(id) on delete cascade,
@@ -60,12 +69,21 @@ with check (id = auth.uid());
 create policy "authenticated can view sessions"
 on sessions for select
 to authenticated
-using (true);
+using (
+  sessions.is_public = true
+  or sessions.created_by = auth.uid()
+  or exists (
+    select 1 from session_members sm
+    where sm.session_id = sessions.id
+      and sm.user_id = auth.uid()
+      and sm.left_at is null
+  )
+);
 
 create policy "authenticated can create sessions"
 on sessions for insert
 to authenticated
-with check (true);
+with check (sessions.created_by = auth.uid());
 
 create policy "members can view session_members"
 on session_members for select

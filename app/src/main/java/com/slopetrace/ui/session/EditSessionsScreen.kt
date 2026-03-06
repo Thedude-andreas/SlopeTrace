@@ -28,19 +28,20 @@ import androidx.compose.ui.unit.dp
 import com.slopetrace.data.model.Session
 import kotlinx.datetime.Instant
 import java.time.Instant as JavaInstant
-import java.time.ZoneId
 import java.time.LocalDateTime
+import java.time.ZoneId
 import java.time.format.DateTimeFormatter
 import java.util.Locale
 
 @Composable
 fun EditSessionsScreen(
-    sessions: List<Session>,
+    ownSessions: List<Session>,
+    nearbyPublicSessions: List<Session>,
     activeSessionId: String?,
     mergePreview: MergePreview?,
     isLoading: Boolean,
     errorMessage: String?,
-    onCreateSession: (String) -> Unit,
+    onCreateSession: (String, Boolean) -> Unit,
     onOpenSession: (String) -> Unit,
     onRenameSession: (String, String) -> Unit,
     onDeleteSelected: (List<String>) -> Unit,
@@ -54,12 +55,13 @@ fun EditSessionsScreen(
     }
     var showCreateDialog by remember { mutableStateOf(false) }
     var newSessionNameDraft by remember { mutableStateOf(defaultSessionName) }
+    var newSessionIsPublic by remember { mutableStateOf(false) }
     var mergedNameDraft by remember { mutableStateOf("Merged ${DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm", Locale.ENGLISH).format(java.time.LocalDateTime.now())}") }
     var renameSessionId by remember { mutableStateOf<String?>(null) }
     var renameDraft by remember { mutableStateOf("") }
 
-    LaunchedEffect(sessions) {
-        val validIds = sessions.map { it.id }.toSet()
+    LaunchedEffect(ownSessions) {
+        val validIds = ownSessions.map { it.id }.toSet()
         selectedForMerge.removeAll { it !in validIds }
     }
 
@@ -71,14 +73,15 @@ fun EditSessionsScreen(
     ) {
         Text("Edit Sessions")
 
-        val allSelected = sessions.isNotEmpty() && selectedForMerge.size == sessions.size
+        Text("My sessions")
+        val allSelected = ownSessions.isNotEmpty() && selectedForMerge.size == ownSessions.size
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             Checkbox(
                 checked = allSelected,
                 onCheckedChange = { checked ->
                     selectedForMerge.clear()
                     if (checked) {
-                        selectedForMerge.addAll(sessions.map { it.id })
+                        selectedForMerge.addAll(ownSessions.map { it.id })
                     }
                 }
             )
@@ -87,7 +90,10 @@ fun EditSessionsScreen(
 
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             Button(
-                onClick = { showCreateDialog = true },
+                onClick = {
+                    showCreateDialog = true
+                    newSessionIsPublic = false
+                },
                 enabled = !isLoading
             ) {
                 Text("New")
@@ -134,7 +140,7 @@ fun EditSessionsScreen(
         }
 
         LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            items(sessions) { session ->
+            items(ownSessions) { session ->
                 val selected = session.id in selectedForMerge
                 Card(modifier = Modifier.fillMaxWidth()) {
                     Column(
@@ -155,6 +161,7 @@ fun EditSessionsScreen(
                             Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
                                 Text(session.name)
                                 Text("Started: ${session.startTime.toDisplayString()}")
+                                Text("Private: ${if (session.isPublic) "No" else "Yes"}")
                                 if (session.id == activeSessionId) {
                                     Text("Current active session")
                                 }
@@ -173,6 +180,30 @@ fun EditSessionsScreen(
                                 enabled = !isLoading
                             ) { Text("Rename") }
                         }
+                    }
+                }
+            }
+
+            if (nearbyPublicSessions.isNotEmpty()) {
+                item {
+                    Text("Nearby public sessions (20 km)")
+                }
+            }
+
+            items(nearbyPublicSessions) { session ->
+                Card(modifier = Modifier.fillMaxWidth()) {
+                    Column(
+                        modifier = Modifier.padding(12.dp),
+                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Text(session.name)
+                        Text("Started: ${session.startTime.toDisplayString()}")
+                        val distance = session.distanceMeters?.toInt()?.toString() ?: "?"
+                        Text("Distance: ${distance} m")
+                        Button(
+                            onClick = { onOpenSession(session.id) },
+                            enabled = !isLoading
+                        ) { Text("Join") }
                     }
                 }
             }
@@ -214,16 +245,25 @@ fun EditSessionsScreen(
             onDismissRequest = { showCreateDialog = false },
             title = { Text("Create session") },
             text = {
-                OutlinedTextField(
-                    value = newSessionNameDraft,
-                    onValueChange = { newSessionNameDraft = it },
-                    label = { Text("Session name") }
-                )
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    OutlinedTextField(
+                        value = newSessionNameDraft,
+                        onValueChange = { newSessionNameDraft = it },
+                        label = { Text("Session name") }
+                    )
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Checkbox(
+                            checked = newSessionIsPublic,
+                            onCheckedChange = { newSessionIsPublic = it }
+                        )
+                        Text("Public session")
+                    }
+                }
             },
             confirmButton = {
                 TextButton(
                     onClick = {
-                        onCreateSession(newSessionNameDraft.trim())
+                        onCreateSession(newSessionNameDraft.trim(), newSessionIsPublic)
                         showCreateDialog = false
                     },
                     enabled = newSessionNameDraft.trim().isNotEmpty() && !isLoading

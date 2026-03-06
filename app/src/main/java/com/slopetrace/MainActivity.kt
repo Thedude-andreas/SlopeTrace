@@ -14,6 +14,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
@@ -43,6 +44,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.ViewModel
@@ -55,11 +57,14 @@ import com.slopetrace.di.AppContainer
 import com.slopetrace.service.TrackingForegroundService
 import com.slopetrace.ui.live.Live3DScreen
 import com.slopetrace.ui.login.LoginScreen
+import com.slopetrace.ui.login.SignUpScreen
 import com.slopetrace.ui.session.EditSessionsScreen
 import com.slopetrace.ui.session.SessionViewModel
 import com.slopetrace.ui.stats.StatsScreen
 import com.slopetrace.ui.theme.AppPalette
 import com.slopetrace.ui.theme.SlopeTraceTheme
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 
 class MainActivity : ComponentActivity() {
@@ -203,14 +208,24 @@ class MainActivity : ComponentActivity() {
                                 navController.navigate("edit-sessions")
                                 drawerScope.launch { drawerState.close() }
                             }
+                            if (state.isAuthenticated) {
+                                DrawerItem("Log out") {
+                                    vm.logout()
+                                    navController.navigate("login")
+                                    drawerScope.launch { drawerState.close() }
+                                }
+                            }
                         }
                     }
                 ) {
                     Scaffold(
                         contentWindowInsets = WindowInsets.safeDrawing,
                         topBar = {
+                            val alias = state.userProfiles[state.userId]?.alias?.trim().orEmpty()
+                            val resolvedAlias = alias.ifBlank { "Rider" }
                             TopBar(
                                 currentRoute = currentRoute,
+                                loggedInAlias = if (state.isAuthenticated) resolvedAlias else null,
                                 onMenu = { drawerScope.launch { drawerState.open() } }
                             )
                         }
@@ -223,15 +238,34 @@ class MainActivity : ComponentActivity() {
                             composable("login") {
                                 LoginScreen(
                                     onLogin = vm::login,
-                                    onSignUp = vm::signUp,
                                     rememberMe = state.rememberMe,
                                     onRememberMeChange = vm::setRememberMe,
+                                    onNavigateSignUp = { navController.navigate("signup") },
+                                    onSuccessNavigate = { navController.navigate("edit-sessions") },
+                                    errorMessage = state.errorMessage,
+                                    isLoading = state.isLoading
+                                )
+                            }
+                            composable("signup") {
+                                SignUpScreen(
+                                    onSignUp = vm::signUp,
+                                    onNavigateBackToLogin = { navController.navigate("login") },
                                     onSuccessNavigate = { navController.navigate("edit-sessions") },
                                     errorMessage = state.errorMessage,
                                     isLoading = state.isLoading
                                 )
                             }
                             composable("live") {
+                                LaunchedEffect(state.activeSessionId) {
+                                    vm.refreshLiveSnapshot()
+                                }
+                                LaunchedEffect(state.activeSessionId, state.isRealtimeConnected) {
+                                    if (!state.isRealtimeConnected || state.activeSessionId == null) return@LaunchedEffect
+                                    while (isActive) {
+                                        delay(2_000L)
+                                        vm.refreshLiveSnapshotSilently()
+                                    }
+                                }
                                 Live3DScreen(
                                     state = state,
                                     onStartTracking = vm::requestStartTracking,
@@ -258,14 +292,15 @@ class MainActivity : ComponentActivity() {
                                     vm.refreshAvailableSessions()
                                 }
                                 EditSessionsScreen(
-                                    sessions = state.availableSessions,
+                                    ownSessions = state.ownSessions,
+                                    nearbyPublicSessions = state.nearbyPublicSessions,
                                     activeSessionId = state.activeSessionId,
                                     mergePreview = state.mergePreview,
                                     isLoading = state.isLoading,
                                     errorMessage = state.errorMessage,
-                                    onCreateSession = { sessionName ->
+                                    onCreateSession = { sessionName, isPublic ->
                                         ensureLocationPermission {
-                                            vm.createSessionAndJoin(sessionName)
+                                            vm.createSessionAndJoin(sessionName, isPublic)
                                         }
                                     },
                                     onOpenSession = { vm.joinExistingSession(it) },
@@ -316,16 +351,34 @@ private fun DrawerItem(label: String, onClick: () -> Unit) {
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun TopBar(currentRoute: String, onMenu: () -> Unit) {
-    val title = when (currentRoute) {
+private fun TopBar(currentRoute: String, loggedInAlias: String?, onMenu: () -> Unit) {
+    val baseTitle = when (currentRoute) {
         "login" -> "Login"
+        "signup" -> "Sign up"
         "live" -> "Live"
         "stats" -> "Stats"
         "edit-sessions" -> "Edit Sessions"
         else -> "SlopeTrace"
     }
     TopAppBar(
-        title = { Text(title) },
+        title = {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    text = baseTitle,
+                    modifier = Modifier.weight(1f)
+                )
+                if (loggedInAlias != null) {
+                    Text(
+                        text = "[${loggedInAlias}]",
+                        style = MaterialTheme.typography.labelMedium,
+                        textAlign = TextAlign.End
+                    )
+                }
+            }
+        },
         navigationIcon = {
             IconButton(onClick = onMenu, modifier = Modifier.padding(start = 8.dp)) {
                 Text("☰", color = AppPalette.Accent)

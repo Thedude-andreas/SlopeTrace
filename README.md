@@ -20,8 +20,14 @@ Ski tracking app for alpine sessions with sensor fusion, 3D trail rendering, eve
     - First 10m are backfilled once confirmed.
 - 3D view:
   - Multi-user trail rendering.
+  - Live refresh in live view (periodic session snapshot updates).
+  - Active/inactive rider status in legend with live speed and distance to active users.
   - Grid floor at minimum recorded Z.
   - Camera rotate + pinch zoom.
+- Auth and navigation:
+  - Email login + sign up with alias.
+  - Log out action in hamburger menu.
+  - Header shows signed-in alias in brackets.
 - Stats:
   - Session totals (runs, lift/downhill/other time, max session speed).
   - Event feed for each lift and downhill.
