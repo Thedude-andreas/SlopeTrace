@@ -21,6 +21,9 @@ interface TrackingDao {
     @Query("SELECT * FROM tracking_points WHERE synced = 0 AND sessionId = :sessionId ORDER BY timestampMs ASC LIMIT :limit")
     suspend fun pendingSync(sessionId: String, limit: Int): List<TrackingPointEntity>
 
+    @Query("SELECT COUNT(*) FROM tracking_points WHERE synced = 0 AND sessionId = :sessionId")
+    suspend fun countPendingSync(sessionId: String): Int
+
     @Query("UPDATE tracking_points SET synced = 1 WHERE id IN (:ids)")
     suspend fun markSynced(ids: List<Long>): Int
 

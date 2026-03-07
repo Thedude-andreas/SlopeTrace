@@ -48,6 +48,23 @@ alter table sessions enable row level security;
 alter table session_members enable row level security;
 alter table position_stream enable row level security;
 
+create or replace function can_read_session_members(target_session_id uuid)
+returns boolean
+language sql
+security definer
+set search_path = public
+as $$
+  select exists (
+    select 1
+    from session_members sm
+    where sm.session_id = target_session_id
+      and sm.user_id = auth.uid()
+      and sm.left_at is null
+  );
+$$;
+
+grant execute on function can_read_session_members(uuid) to authenticated;
+
 create policy "users can read own profile"
 on users_profile for select
 using (id = auth.uid());
@@ -72,12 +89,7 @@ to authenticated
 using (
   sessions.is_public = true
   or sessions.created_by = auth.uid()
-  or exists (
-    select 1 from session_members sm
-    where sm.session_id = sessions.id
-      and sm.user_id = auth.uid()
-      and sm.left_at is null
-  )
+  or can_read_session_members(sessions.id)
 );
 
 create policy "authenticated can create sessions"
@@ -87,7 +99,7 @@ with check (sessions.created_by = auth.uid());
 
 create policy "members can view session_members"
 on session_members for select
-using (user_id = auth.uid());
+using (can_read_session_members(session_id));
 
 create policy "users can join sessions as self"
 on session_members for insert
@@ -101,24 +113,14 @@ with check (user_id = auth.uid());
 create policy "members can view session positions"
 on position_stream for select
 using (
-  exists (
-    select 1 from session_members sm
-    where sm.session_id = position_stream.session_id
-      and sm.user_id = auth.uid()
-      and sm.left_at is null
-  )
+  can_read_session_members(position_stream.session_id)
 );
 
 create policy "members can insert own session positions"
 on position_stream for insert
 with check (
   user_id = auth.uid() and
-  exists (
-    select 1 from session_members sm
-    where sm.session_id = position_stream.session_id
-      and sm.user_id = auth.uid()
-      and sm.left_at is null
-  )
+  can_read_session_members(position_stream.session_id)
 );
 
 create or replace function create_merged_session(source_session_ids uuid[], merged_name text)

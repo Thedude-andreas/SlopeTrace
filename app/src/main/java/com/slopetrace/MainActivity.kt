@@ -182,6 +182,14 @@ class MainActivity : ComponentActivity() {
                     }
                 }
 
+                LaunchedEffect(state.activeSessionId, state.userId, state.isAuthenticated, state.isTrackingActive) {
+                    if (state.activeSessionId == null || !state.isAuthenticated) return@LaunchedEffect
+                    while (isActive) {
+                        vm.ensureRealtimeConnection()
+                        delay(5_000L)
+                    }
+                }
+
                 ModalNavigationDrawer(
                     drawerState = drawerState,
                     gesturesEnabled = false,
@@ -295,6 +303,7 @@ class MainActivity : ComponentActivity() {
                                     ownSessions = state.ownSessions,
                                     nearbyPublicSessions = state.nearbyPublicSessions,
                                     activeSessionId = state.activeSessionId,
+                                    pendingResumeSessionId = state.pendingResumeSessionId,
                                     mergePreview = state.mergePreview,
                                     isLoading = state.isLoading,
                                     errorMessage = state.errorMessage,
@@ -304,6 +313,8 @@ class MainActivity : ComponentActivity() {
                                         }
                                     },
                                     onOpenSession = { vm.joinExistingSession(it) },
+                                    onResumeSession = vm::resumeStoredSession,
+                                    onDismissResumeSession = vm::dismissPendingResumeSession,
                                     onRenameSession = vm::renameSession,
                                     onDeleteSelected = vm::deleteSelectedSessions,
                                     onPreviewMerge = vm::previewSessionMerge,

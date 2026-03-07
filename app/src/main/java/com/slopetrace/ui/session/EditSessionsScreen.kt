@@ -38,11 +38,14 @@ fun EditSessionsScreen(
     ownSessions: List<Session>,
     nearbyPublicSessions: List<Session>,
     activeSessionId: String?,
+    pendingResumeSessionId: String?,
     mergePreview: MergePreview?,
     isLoading: Boolean,
     errorMessage: String?,
     onCreateSession: (String, Boolean) -> Unit,
     onOpenSession: (String) -> Unit,
+    onResumeSession: () -> Unit,
+    onDismissResumeSession: () -> Unit,
     onRenameSession: (String, String) -> Unit,
     onDeleteSelected: (List<String>) -> Unit,
     onPreviewMerge: (List<String>) -> Unit,
@@ -72,6 +75,23 @@ fun EditSessionsScreen(
         verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
         Text("Edit Sessions")
+
+        if (pendingResumeSessionId != null) {
+            Card(modifier = Modifier.fillMaxWidth()) {
+                Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text("Previous session available")
+                    Text("Resume session ${pendingResumeSessionId.take(8)} and reconnect live sharing.")
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Button(onClick = onResumeSession, enabled = !isLoading) {
+                            Text("Resume")
+                        }
+                        TextButton(onClick = onDismissResumeSession, enabled = !isLoading) {
+                            Text("Dismiss")
+                        }
+                    }
+                }
+            }
+        }
 
         Text("My sessions")
         val allSelected = ownSessions.isNotEmpty() && selectedForMerge.size == ownSessions.size

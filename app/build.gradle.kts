@@ -7,12 +7,12 @@ plugins {
 
 android {
     namespace = "com.slopetrace"
-    compileSdk = 35
+    compileSdk = 36
 
     defaultConfig {
         applicationId = "com.slopetrace"
         minSdk = 26
-        targetSdk = 35
+        targetSdk = 36
         versionCode = 1
         versionName = "0.1.0"
 
@@ -85,7 +85,7 @@ dependencies {
     implementation("io.github.jan-tennert.supabase:postgrest-kt")
     implementation("io.github.jan-tennert.supabase:realtime-kt")
     implementation("io.github.jan-tennert.supabase:gotrue-kt")
-    implementation("io.ktor:ktor-client-android:2.3.12")
+    implementation("io.ktor:ktor-client-cio:2.3.12")
 
     implementation("androidx.work:work-runtime-ktx:2.9.1")
 

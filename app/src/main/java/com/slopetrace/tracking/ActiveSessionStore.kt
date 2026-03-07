@@ -1,6 +1,7 @@
 package com.slopetrace.tracking
 
 import android.content.Context
+import androidx.core.content.edit
 
 data class ActiveSessionState(
     val sessionId: String,
@@ -11,10 +12,10 @@ class ActiveSessionStore(context: Context) {
     private val prefs = context.applicationContext.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE)
 
     fun save(state: ActiveSessionState) {
-        prefs.edit()
-            .putString(KEY_SESSION_ID, state.sessionId)
-            .putString(KEY_USER_ID, state.userId)
-            .apply()
+        prefs.edit {
+            putString(KEY_SESSION_ID, state.sessionId)
+            putString(KEY_USER_ID, state.userId)
+        }
     }
 
     fun load(): ActiveSessionState? {
@@ -24,10 +25,10 @@ class ActiveSessionStore(context: Context) {
     }
 
     fun clear() {
-        prefs.edit()
-            .remove(KEY_SESSION_ID)
-            .remove(KEY_USER_ID)
-            .apply()
+        prefs.edit {
+            remove(KEY_SESSION_ID)
+            remove(KEY_USER_ID)
+        }
     }
 
     companion object {

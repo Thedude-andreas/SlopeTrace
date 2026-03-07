@@ -2,12 +2,6 @@ package com.slopetrace.data.model
 
 import kotlinx.datetime.Instant
 
-data class AppUser(
-    val id: String,
-    val name: String,
-    val color: String
-)
-
 data class UserProfile(
     val id: String,
     val alias: String,

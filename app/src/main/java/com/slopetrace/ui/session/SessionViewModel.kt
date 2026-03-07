@@ -8,6 +8,7 @@ import com.slopetrace.data.model.SegmentType
 import com.slopetrace.data.model.Session
 import com.slopetrace.data.model.TrackingPoint
 import com.slopetrace.data.model.UserProfile
+import com.slopetrace.data.remote.RealtimeConnectionState
 import com.slopetrace.data.remote.RealtimeRepository
 import com.slopetrace.domain.stats.SessionStats
 import com.slopetrace.domain.stats.StatsEngine
@@ -18,6 +19,7 @@ import com.slopetrace.ui.login.AuthPreferencesStore
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.async
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -66,12 +68,18 @@ data class SessionUiState(
     val gpsVerticalAccuracyM: Float? = null,
     val showGpsWaitingDialog: Boolean = false,
     val mergePreview: MergePreview? = null,
-    val lastExportPath: String? = null,
+    val pendingResumeSessionId: String? = null,
+    val presentUserIds: Set<String> = emptySet(),
+    val pendingSyncCount: Int = 0,
+    val isSyncing: Boolean = false,
+    val lastSyncedAtMs: Long? = null,
+    val syncErrorMessage: String? = null,
     val isLoading: Boolean = false,
     val loadingMessage: String? = null,
     val rememberMe: Boolean = true,
     val isAuthenticated: Boolean = false,
     val isRealtimeConnected: Boolean = false,
+    val realtimeConnectionState: RealtimeConnectionState = RealtimeConnectionState.DISCONNECTED,
     val errorMessage: String? = null
 )
 
@@ -87,19 +95,74 @@ class SessionViewModel(
     val ui: StateFlow<SessionUiState> = _ui.asStateFlow()
 
     private var trackingCollectJob: Job? = null
+    private var livePositionCollectJob: Job? = null
+    private val storedSessionCandidate = activeSessionStore.load()
 
     init {
         _ui.update { it.copy(rememberMe = authPreferencesStore.isRememberMeEnabled()) }
 
-        activeSessionStore.load()?.let { state ->
-            _ui.update {
-                it.copy(
-                    activeSessionId = state.sessionId,
-                    userId = state.userId,
-                    isTrackingActive = false
-                )
+        livePositionCollectJob = viewModelScope.launch {
+            realtimeRepository.incomingPositions.collectLatest { point ->
+                val activeSessionId = _ui.value.activeSessionId ?: return@collectLatest
+                if (point.sessionId != activeSessionId) return@collectLatest
+
+                _ui.update { state ->
+                    val updatedTrail = (state.remoteTrailsByUser[point.userId].orEmpty() + point)
+                        .sortedBy { it.timestamp }
+                        .distinct()
+                    state.copy(
+                        remoteTrailsByUser = state.remoteTrailsByUser + (point.userId to updatedTrail),
+                        members = mergeMemberIds(
+                            existing = state.members,
+                            trailUserIds = updatedTrail.map { it.userId }.toSet() + state.remoteTrailsByUser.keys,
+                            presentUserIds = state.presentUserIds,
+                            currentUserId = state.userId
+                        ),
+                        errorMessage = null
+                    )
+                }
             }
-            startTrackingCollection(sessionId = state.sessionId, userId = state.userId)
+        }
+        viewModelScope.launch {
+            realtimeRepository.presenceByUser.collectLatest { presences ->
+                _ui.update { state ->
+                    state.copy(
+                        presentUserIds = presences.keys,
+                        members = mergeMemberIds(
+                            existing = state.members,
+                            trailUserIds = state.remoteTrailsByUser.keys,
+                            presentUserIds = presences.keys,
+                            currentUserId = state.userId
+                        )
+                    )
+                }
+            }
+        }
+        viewModelScope.launch {
+            realtimeRepository.connectionState.collectLatest { connectionState ->
+                _ui.update {
+                    it.copy(
+                        isRealtimeConnected = connectionState == RealtimeConnectionState.CONNECTED,
+                        realtimeConnectionState = connectionState
+                    )
+                }
+            }
+        }
+        viewModelScope.launch {
+            realtimeRepository.syncStatus.collectLatest { syncStatus ->
+                _ui.update { state ->
+                    if (syncStatus.sessionId != null && state.activeSessionId != null && syncStatus.sessionId != state.activeSessionId) {
+                        state
+                    } else {
+                        state.copy(
+                            pendingSyncCount = syncStatus.pendingCount,
+                            isSyncing = syncStatus.isSyncing,
+                            lastSyncedAtMs = syncStatus.lastSyncedAtMs,
+                            syncErrorMessage = syncStatus.lastErrorMessage
+                        )
+                    }
+                }
+            }
         }
     }
 
@@ -107,11 +170,13 @@ class SessionViewModel(
         viewModelScope.launch {
             val remember = authPreferencesStore.isRememberMeEnabled()
             if (!remember) {
+                activeSessionStore.clear()
                 _ui.update {
                     it.copy(
                         rememberMe = false,
                         isAuthenticated = false,
-                        userId = "local-user"
+                        userId = "local-user",
+                        pendingResumeSessionId = null
                     )
                 }
                 return@launch
@@ -120,13 +185,27 @@ class SessionViewModel(
             val userId = realtimeRepository.currentUserIdOrNull()
             if (userId != null) {
                 val profile = runCatching { realtimeRepository.fetchUserProfiles(setOf(userId))[userId] }.getOrNull()
+                val resumeCandidate = resolveResumeCandidate(remember, userId, storedSessionCandidate)
+                if (storedSessionCandidate != null && resumeCandidate == null) {
+                    activeSessionStore.clear()
+                }
                 _ui.update {
                     it.copy(
                         rememberMe = true,
                         isAuthenticated = true,
                         userId = userId,
+                        pendingResumeSessionId = resumeCandidate?.sessionId,
                         userProfiles = profile?.let { p -> it.userProfiles + (userId to p) } ?: it.userProfiles,
                         errorMessage = null
+                    )
+                }
+            } else {
+                activeSessionStore.clear()
+                _ui.update {
+                    it.copy(
+                        pendingResumeSessionId = null,
+                        isAuthenticated = false,
+                        userId = "local-user"
                     )
                 }
             }
@@ -306,14 +385,16 @@ class SessionViewModel(
     }
 
     fun stopTracking() {
+        val sessionId = _ui.value.activeSessionId ?: return
         if (!_ui.value.isTrackingActive) return
 
         viewModelScope.launch {
             withLoadingSuspend("Stopping tracking...") {
                 trackingCollectJob?.cancel()
                 trackingCollectJob = null
+                realtimeRepository.syncPending(sessionId)
+                realtimeRepository.updatePresence(isTracking = false)
                 trackingRepository.stopTracking()
-                activeSessionStore.clear()
                 _ui.update {
                     it.copy(
                         isTrackingActive = false,
@@ -337,30 +418,44 @@ class SessionViewModel(
 
         val userId = realtimeRepository.requireCurrentUserId()
         val resolvedSessionId = realtimeRepository.joinSession(sessionId)
-        val (members, historicalLocalPoints, liftLabels) = coroutineScope {
-            val membersDeferred = async { realtimeRepository.fetchSessionMembers(resolvedSessionId) }
+        val sessionJoinResult = coroutineScope {
+            val membersDeferred = async {
+                runCatching { realtimeRepository.fetchSessionMembers(resolvedSessionId) }
+                    .getOrDefault(listOf(userId))
+            }
             val pointsDeferred = async { trackingRepository.loadSessionPoints(resolvedSessionId) }
             val liftLabelsDeferred = async { trackingRepository.getLiftLabels(resolvedSessionId) }
-            val connectDeferred = async { realtimeRepository.connectRealtime(resolvedSessionId) }
+            val connectDeferred = async {
+                runCatching { realtimeRepository.connectRealtime(resolvedSessionId, userId, isTracking = false) }
+                    .exceptionOrNull()
+            }
 
             val triple = Triple(
                 membersDeferred.await(),
                 pointsDeferred.await(),
                 liftLabelsDeferred.await()
             )
-            connectDeferred.await()
-            triple
+            triple to connectDeferred.await()
         }
+        val (data, realtimeError) = sessionJoinResult
+        val (members, historicalLocalPoints, liftLabels) = data
 
         val stats = statsEngine.compute(historicalLocalPoints)
         val profiles = realtimeRepository.fetchUserProfiles((members + userId).toSet())
+        activeSessionStore.save(ActiveSessionState(sessionId = resolvedSessionId, userId = userId))
+        realtimeRepository.refreshPendingSyncCount(resolvedSessionId)
         _ui.update {
             it.copy(
                 activeSessionId = resolvedSessionId,
                 userId = userId,
-                members = members,
+                members = mergeMemberIds(
+                    existing = members,
+                    trailUserIds = historicalLocalPoints.map { point -> point.userId }.toSet(),
+                    presentUserIds = setOf(userId),
+                    currentUserId = userId
+                ),
+                presentUserIds = setOf(userId),
                 userProfiles = profiles,
-                isRealtimeConnected = true,
                 points = historicalLocalPoints,
                 currentSegment = historicalLocalPoints.lastOrNull()?.segmentType ?: SegmentType.UNKNOWN,
                 stats = stats,
@@ -368,31 +463,38 @@ class SessionViewModel(
                 liftLabels = liftLabels,
                 rawToPhysicalLiftId = stats.lifts.associate { lift -> lift.liftId to lift.physicalLiftId },
                 isTrackingActive = false,
-                pendingStartDistanceMeters = null
+                pendingStartDistanceMeters = null,
+                pendingResumeSessionId = null,
+                errorMessage = realtimeError?.let {
+                    toUserMessage(it, "Joined session, but live sync is reconnecting.")
+                }
             )
         }
-
     }
 
     private fun startTrackingCollection(sessionId: String, userId: String) {
         if (_ui.value.isTrackingActive) return
 
-        activeSessionStore.save(ActiveSessionState(sessionId = sessionId, userId = userId))
         trackingCollectJob?.cancel()
         trackingCollectJob = viewModelScope.launch {
+            realtimeRepository.updatePresence(isTracking = true)
             _ui.update { it.copy(isTrackingActive = true, pendingStartDistanceMeters = null) }
+            var lastPointCount = 0
             trackingRepository.startTracking(sessionId, userId).collect { points ->
                 val currentSegment = points.lastOrNull()?.segmentType ?: SegmentType.UNKNOWN
                 val stats = statsEngine.compute(points)
+                val delta = (points.size - lastPointCount).coerceAtLeast(0)
+                lastPointCount = points.size
                 _ui.update {
                     it.copy(
                         points = points,
                         currentSegment = currentSegment,
                         stats = stats,
-                        rawToPhysicalLiftId = stats.lifts.associate { lift -> lift.liftId to lift.physicalLiftId }
+                        rawToPhysicalLiftId = stats.lifts.associate { lift -> lift.liftId to lift.physicalLiftId },
+                        pendingSyncCount = (it.pendingSyncCount + delta).coerceAtLeast(0)
                     )
                 }
-                if (points.size % 5 == 0) {
+                if (points.size % 5 == 0 || points.size == 1) {
                     realtimeRepository.enqueueAndSync(sessionId)
                 }
             }
@@ -419,15 +521,21 @@ class SessionViewModel(
         runCatching {
             realtimeRepository.fetchSessionTrails(sessionId)
         }.onSuccess { trails ->
-            val userIds = trails.keys + _ui.value.userId
+            val userIds = trails.keys + _ui.value.userId + _ui.value.members + _ui.value.presentUserIds
             val profiles = runCatching { realtimeRepository.fetchUserProfiles(userIds.toSet()) }
                 .getOrElse { _ui.value.userProfiles }
             _ui.update {
                 it.copy(
                     remoteTrailsByUser = trails,
-                    members = trails.keys.sorted(),
+                    members = mergeMemberIds(
+                        existing = it.members,
+                        trailUserIds = trails.keys,
+                        presentUserIds = it.presentUserIds,
+                        currentUserId = it.userId
+                    ),
                     userProfiles = profiles,
-                    errorMessage = null
+                    errorMessage = null,
+                    pendingResumeSessionId = null
                 )
             }
         }.onFailure { error ->
@@ -442,13 +550,13 @@ class SessionViewModel(
                 try {
                     trackingCollectJob?.cancel()
                     trackingCollectJob = null
+                    realtimeRepository.syncPending(sessionId)
                     trackingRepository.stopTracking()
                     realtimeRepository.disconnectRealtime(sessionId)
                 } finally {
-                    val exportPath = runCatching {
+                    runCatching {
                         trackingRepository.exportSessionToJson(sessionId)
-                    }.getOrNull()
-
+                    }
                     activeSessionStore.clear()
                     _ui.update {
                         it.copy(
@@ -461,10 +569,14 @@ class SessionViewModel(
                             liftLabels = emptyMap(),
                             rawToPhysicalLiftId = emptyMap(),
                             members = emptyList(),
+                            presentUserIds = emptySet(),
                             isTrackingActive = false,
                             pendingStartDistanceMeters = null,
                             showGpsWaitingDialog = false,
-                            lastExportPath = exportPath
+                            pendingSyncCount = 0,
+                            isSyncing = false,
+                            syncErrorMessage = null,
+                            realtimeConnectionState = RealtimeConnectionState.DISCONNECTED
                         )
                     }
                 }
@@ -478,10 +590,16 @@ class SessionViewModel(
                 realtimeRepository.login(email, password)
                 val userId = realtimeRepository.requireCurrentUserId()
                 val profile = runCatching { realtimeRepository.fetchUserProfiles(setOf(userId))[userId] }.getOrNull()
+                val resumeCandidate = resolveResumeCandidate(
+                    rememberMe = _ui.value.rememberMe,
+                    currentUserId = userId,
+                    storedState = storedSessionCandidate
+                )
                 _ui.update {
                     it.copy(
                         userId = userId,
                         isAuthenticated = true,
+                        pendingResumeSessionId = resumeCandidate?.sessionId,
                         userProfiles = profile?.let { p -> it.userProfiles + (userId to p) } ?: it.userProfiles,
                         errorMessage = null
                     )
@@ -510,10 +628,16 @@ class SessionViewModel(
                 realtimeRepository.upsertCurrentUserProfile(trimmedAlias)
                 val userId = realtimeRepository.requireCurrentUserId()
                 val profile = runCatching { realtimeRepository.fetchUserProfiles(setOf(userId))[userId] }.getOrNull()
+                val resumeCandidate = resolveResumeCandidate(
+                    rememberMe = _ui.value.rememberMe,
+                    currentUserId = userId,
+                    storedState = storedSessionCandidate
+                )
                 _ui.update {
                     it.copy(
                         userId = userId,
                         isAuthenticated = true,
+                        pendingResumeSessionId = resumeCandidate?.sessionId,
                         userProfiles = if (profile != null) {
                             it.userProfiles + (userId to profile)
                         } else {
@@ -536,7 +660,19 @@ class SessionViewModel(
         if (!realtimeRepository.handleAuthIntent(intent)) return
         runCatching { realtimeRepository.requireCurrentUserId() }
             .onSuccess { userId ->
-                _ui.update { it.copy(userId = userId, isAuthenticated = true, errorMessage = null) }
+                val resumeCandidate = resolveResumeCandidate(
+                    rememberMe = _ui.value.rememberMe,
+                    currentUserId = userId,
+                    storedState = storedSessionCandidate
+                )
+                _ui.update {
+                    it.copy(
+                        userId = userId,
+                        isAuthenticated = true,
+                        pendingResumeSessionId = resumeCandidate?.sessionId,
+                        errorMessage = null
+                    )
+                }
                 viewModelScope.launch {
                     val profile = runCatching { realtimeRepository.fetchUserProfiles(setOf(userId))[userId] }.getOrNull()
                     if (profile != null) {
@@ -554,6 +690,7 @@ class SessionViewModel(
                 trackingCollectJob = null
                 trackingRepository.stopTracking()
                 if (sessionId != null) {
+                    realtimeRepository.syncPending(sessionId)
                     runCatching { realtimeRepository.disconnectRealtime(sessionId) }
                 }
                 activeSessionStore.clear()
@@ -568,6 +705,7 @@ class SessionViewModel(
                         ownSessions = emptyList(),
                         nearbyPublicSessions = emptyList(),
                         remoteTrailsByUser = emptyMap(),
+                        presentUserIds = emptySet(),
                         userProfiles = emptyMap(),
                         liftLabels = emptyMap(),
                         rawToPhysicalLiftId = emptyMap(),
@@ -578,8 +716,14 @@ class SessionViewModel(
                         gpsVerticalAccuracyM = null,
                         showGpsWaitingDialog = false,
                         mergePreview = null,
+                        pendingResumeSessionId = null,
+                        pendingSyncCount = 0,
+                        isSyncing = false,
+                        lastSyncedAtMs = null,
+                        syncErrorMessage = null,
                         isAuthenticated = false,
                         isRealtimeConnected = false,
+                        realtimeConnectionState = RealtimeConnectionState.DISCONNECTED,
                         errorMessage = null
                     )
                 }
@@ -625,24 +769,6 @@ class SessionViewModel(
                     _ui.update { it.copy(ownSessions = ownSessions, errorMessage = null) }
                 }.onFailure { error ->
                     _ui.update { it.copy(errorMessage = toUserMessage(error, "Could not rename session.")) }
-                }
-            }
-        }
-    }
-
-    fun deleteSession(sessionId: String) {
-        viewModelScope.launch {
-            withLoadingSuspend("Deleting session...") {
-                runCatching {
-                    realtimeRepository.deleteSession(sessionId)
-                    trackingRepository.clearLocalSession(sessionId)
-                }.onSuccess {
-                    if (_ui.value.activeSessionId == sessionId) {
-                        leaveSession()
-                    }
-                    refreshAvailableSessions()
-                }.onFailure { error ->
-                    _ui.update { it.copy(errorMessage = toUserMessage(error, "Could not delete session.")) }
                 }
             }
         }
@@ -737,15 +863,87 @@ class SessionViewModel(
         _ui.update { it.copy(mergePreview = null) }
     }
 
+    fun resumeStoredSession() {
+        val sessionId = _ui.value.pendingResumeSessionId ?: return
+        joinExistingSession(sessionId)
+    }
+
+    fun dismissPendingResumeSession() {
+        activeSessionStore.clear()
+        _ui.update { it.copy(pendingResumeSessionId = null) }
+    }
+
+    fun ensureRealtimeConnection() {
+        val state = _ui.value
+        val sessionId = state.activeSessionId ?: return
+        if (!state.isAuthenticated) return
+        viewModelScope.launch {
+            runCatching {
+                realtimeRepository.ensureRealtimeConnected(
+                    sessionId = sessionId,
+                    userId = state.userId,
+                    isTracking = state.isTrackingActive
+                )
+            }.onFailure { error ->
+                val message = error.message?.trim()
+                _ui.update {
+                    it.copy(
+                        realtimeConnectionState = RealtimeConnectionState.RECONNECTING,
+                        syncErrorMessage = if (message.isNullOrBlank()) {
+                            "Live sync is reconnecting."
+                        } else {
+                            message
+                        },
+                        errorMessage = null
+                    )
+                }
+            }
+        }
+    }
+
     private fun toUserMessage(error: Throwable, fallback: String): String {
+        val rawMessage = error.message?.trim().orEmpty()
         val message = error.message?.lowercase().orEmpty()
         return when {
             "email not confirmed" in message -> "Email is not confirmed yet."
             "invalid login credentials" in message -> "Invalid email or password."
             "session id must be a valid uuid" in message -> "Invalid session ID."
             "location" in message && "permission" in message -> "Location permission is missing."
+            "realtime subscribe timed out" in message -> rawMessage
+            "realtime subscribe failed" in message -> rawMessage
             "network" in message || "timeout" in message -> "Network error. Check your connection and try again."
             else -> fallback
         }
     }
+
+    override fun onCleared() {
+        trackingCollectJob?.cancel()
+        livePositionCollectJob?.cancel()
+        super.onCleared()
+    }
+}
+
+internal fun resolveResumeCandidate(
+    rememberMe: Boolean,
+    currentUserId: String?,
+    storedState: ActiveSessionState?
+): ActiveSessionState? {
+    if (!rememberMe) return null
+    if (currentUserId == null) return null
+    val stored = storedState ?: return null
+    return stored.takeIf { it.userId == currentUserId }
+}
+
+internal fun mergeMemberIds(
+    existing: List<String>,
+    trailUserIds: Set<String>,
+    presentUserIds: Set<String>,
+    currentUserId: String?
+): List<String> {
+    return buildSet {
+        addAll(existing)
+        addAll(trailUserIds)
+        addAll(presentUserIds)
+        currentUserId?.let(::add)
+    }.sorted()
 }

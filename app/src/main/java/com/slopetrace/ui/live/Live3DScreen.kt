@@ -25,6 +25,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import com.slopetrace.data.model.UserProfile
+import com.slopetrace.data.remote.RealtimeConnectionState
 import com.slopetrace.render.RenderTrailPoint
 import com.slopetrace.render.RendererView
 import com.slopetrace.ui.session.SessionUiState
@@ -47,8 +48,8 @@ fun Live3DScreen(
     val rendererView = remember { RendererView(context) }
     val userVisibility = remember { mutableStateMapOf<String, Boolean>() }
 
-    val allUsers = remember(state.remoteTrailsByUser, state.userId) {
-        (state.remoteTrailsByUser.keys + state.userId).distinct().sorted()
+    val allUsers = remember(state.remoteTrailsByUser, state.userId, state.members, state.presentUserIds) {
+        (state.remoteTrailsByUser.keys + state.userId + state.members + state.presentUserIds).distinct().sorted()
     }
 
     val localTrail = remember(state.points, state.rawToPhysicalLiftId) {
@@ -123,6 +124,12 @@ fun Live3DScreen(
             }
         }.keys
     }
+    val realtimeLabel = when (state.realtimeConnectionState) {
+        RealtimeConnectionState.CONNECTED -> "connected"
+        RealtimeConnectionState.CONNECTING -> "connecting"
+        RealtimeConnectionState.RECONNECTING -> "reconnecting"
+        RealtimeConnectionState.DISCONNECTED -> "disconnected"
+    }
 
     LaunchedEffect(allUsers) {
         allUsers.forEach { userId ->
@@ -162,9 +169,20 @@ fun Live3DScreen(
         verticalArrangement = Arrangement.spacedBy(8.dp)
     ) {
         Text(
-            text = "Segment: ${state.currentSegment} | Members: ${state.members.size} | Realtime: ${state.isRealtimeConnected}",
+            text = "Segment: ${state.currentSegment} | Members: ${state.members.size} | Realtime: $realtimeLabel",
             modifier = Modifier.padding(12.dp)
         )
+        Text(
+            text = "Sync: ${if (state.isSyncing) "syncing" else "idle"} | Pending: ${state.pendingSyncCount} | Last sync: ${state.lastSyncedAtMs?.let(::formatRelativeTime) ?: "-"}",
+            modifier = Modifier.padding(horizontal = 12.dp)
+        )
+        if (!state.syncErrorMessage.isNullOrBlank()) {
+            Text(
+                text = "Sync issue: ${state.syncErrorMessage}",
+                color = Color(0xFFB00020),
+                modifier = Modifier.padding(horizontal = 12.dp)
+            )
+        }
         if (!state.errorMessage.isNullOrBlank()) {
             Text(
                 text = state.errorMessage,
@@ -190,14 +208,20 @@ fun Live3DScreen(
             allUsers.forEach { userId ->
                 val profile = state.userProfiles[userId]
                 val latest = latestByUser[userId]
-                val isActive = userId in trackingActiveUserIds
-                val speedKmh = if (isActive) latest?.speedMps?.times(3.6) else null
-                val distanceM = if (isActive && localLastPoint != null && latest != null && userId != state.userId) {
+                val isSharingLive = userId in trackingActiveUserIds
+                val isPresent = userId in state.presentUserIds || userId == state.userId
+                val speedKmh = if (isSharingLive) latest?.speedMps?.times(3.6) else null
+                val distanceM = if (isSharingLive && localLastPoint != null && latest != null && userId != state.userId) {
                     distanceMeters(localLastPoint, latest)
                 } else {
                     null
                 }
-                val status = if (isActive) "active" else "inactive"
+                val status = when {
+                    userId == state.userId && state.isTrackingActive -> "tracking"
+                    isSharingLive -> "sharing live"
+                    isPresent -> "in session"
+                    else -> "offline"
+                }
 
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     Checkbox(
@@ -317,6 +341,15 @@ private fun parseHexColorOrNull(value: String): Color? {
         }
         Color(argb)
     }.getOrNull()
+}
+
+private fun formatRelativeTime(timestampMs: Long): String {
+    val deltaSec = ((Clock.System.now().toEpochMilliseconds() - timestampMs).coerceAtLeast(0L)) / 1000L
+    return when {
+        deltaSec < 5 -> "just now"
+        deltaSec < 60 -> "${deltaSec}s ago"
+        else -> "${deltaSec / 60}m ago"
+    }
 }
 
 private fun userDotColor(userId: String): Color {
