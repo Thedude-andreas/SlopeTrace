@@ -4,6 +4,7 @@ import android.content.Intent
 import android.util.Log
 import com.slopetrace.BuildConfig
 import com.slopetrace.data.local.TrackingDao
+import com.slopetrace.data.local.TrackingPointEntity
 import com.slopetrace.data.model.PositionStreamItem
 import com.slopetrace.data.model.Session
 import com.slopetrace.data.model.SegmentType
@@ -23,11 +24,14 @@ import io.github.jan.supabase.realtime.channel
 import io.github.jan.supabase.realtime.presenceChangeFlow
 import io.github.jan.supabase.realtime.postgresChangeFlow
 import io.github.jan.supabase.realtime.realtime
+import io.ktor.client.engine.cio.CIO
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.TimeoutCancellationException
+import kotlinx.coroutines.async
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -37,6 +41,8 @@ import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.datetime.Clock
 import kotlinx.datetime.Instant
 import kotlinx.serialization.json.JsonNull
@@ -54,6 +60,7 @@ import kotlin.math.cos
 import kotlin.math.min
 import kotlin.math.sin
 import kotlin.math.sqrt
+import kotlin.time.Duration.Companion.seconds
 
 enum class RealtimeConnectionState {
     DISCONNECTED,
@@ -87,12 +94,25 @@ class RealtimeRepository(
     private companion object {
         const val TAG = "RealtimeRepository"
         const val REALTIME_SUBSCRIBE_TIMEOUT_MS = 5_000L
+        const val SYNC_BATCH_SIZE = 100
+        const val HTTP_REQUEST_TIMEOUT_MS = 30_000L
+        const val HTTP_CONNECT_TIMEOUT_MS = 15_000L
+        const val HTTP_SOCKET_TIMEOUT_MS = 30_000L
     }
 
     private val client = createSupabaseClient(
         supabaseUrl = BuildConfig.SUPABASE_URL,
         supabaseKey = BuildConfig.SUPABASE_ANON_KEY
     ) {
+        requestTimeout = 30.seconds
+        httpEngine = CIO.create {
+            requestTimeout = HTTP_REQUEST_TIMEOUT_MS
+            endpoint.apply {
+                connectTimeout = HTTP_CONNECT_TIMEOUT_MS
+                socketTimeout = HTTP_SOCKET_TIMEOUT_MS
+                connectAttempts = 2
+            }
+        }
         install(Auth) {
             scheme = "slopetrace"
             host = "auth"
@@ -118,6 +138,9 @@ class RealtimeRepository(
     private var nextReconnectAllowedAtMs: Long = 0L
     private var reconnectAttempt: Int = 0
     private var manualDisconnect = false
+    private val syncMutex = Mutex()
+    private val enqueuedSyncSessions = mutableSetOf<String>()
+    private val liveUploadAnchorBySession = mutableMapOf<String, LiveUploadAnchor>()
 
     suspend fun login(email: String, password: String) {
         client.auth.signInWith(Email) {
@@ -133,6 +156,10 @@ class RealtimeRepository(
         }
     }
 
+    suspend fun awaitAuthInitialization() {
+        client.auth.awaitInitialization()
+    }
+
     fun requireCurrentUserId(): String {
         return client.auth.currentUserOrNull()?.id
             ?: error("Not signed in. Sign in before joining a session.")
@@ -143,6 +170,7 @@ class RealtimeRepository(
     }
 
     suspend fun listSessions(): List<Session> {
+        awaitAuthInitialization()
         val sessions = client.postgrest["sessions"]
             .select()
             .decodeList<JsonObject>()
@@ -153,6 +181,7 @@ class RealtimeRepository(
     }
 
     suspend fun createSession(name: String, isPublic: Boolean, latitude: Double?, longitude: Double?): Session {
+        awaitAuthInitialization()
         val sessionName = name.trim().ifEmpty { "Slope session" }
         val id = UUID.randomUUID().toString()
         val now = Clock.System.now()
@@ -183,6 +212,7 @@ class RealtimeRepository(
     }
 
     suspend fun listOwnSessions(): List<Session> {
+        awaitAuthInitialization()
         val currentUserId = requireCurrentUserId()
         val rows = client.postgrest["sessions"]
             .select {
@@ -202,6 +232,7 @@ class RealtimeRepository(
         radiusMeters: Double,
         excludeUserId: String
     ): List<Session> {
+        awaitAuthInitialization()
         val rpcRows = runCatching {
             client.postgrest.rpc(
                 function = "list_nearby_public_sessions",
@@ -241,6 +272,7 @@ class RealtimeRepository(
     }
 
     suspend fun createMergedSessionFromSources(sourceSessionIds: List<String>, mergedName: String): Session {
+        awaitAuthInitialization()
         val normalizedIds = sourceSessionIds.map(::normalizeSessionId).distinct()
         require(normalizedIds.size >= 2) { "At least two source sessions are required." }
         val finalName = mergedName.trim().ifEmpty { "Merged session" }
@@ -264,6 +296,7 @@ class RealtimeRepository(
     }
 
     suspend fun renameSession(sessionId: String, newName: String) {
+        awaitAuthInitialization()
         val normalizedSessionId = normalizeSessionId(sessionId)
         val trimmed = newName.trim()
         require(trimmed.isNotEmpty()) { "Session name cannot be empty." }
@@ -277,6 +310,7 @@ class RealtimeRepository(
     }
 
     suspend fun deleteSessions(sessionIds: List<String>) {
+        awaitAuthInitialization()
         val normalizedIds = sessionIds.map(::normalizeSessionId).distinct()
         if (normalizedIds.isEmpty()) return
 
@@ -326,6 +360,7 @@ class RealtimeRepository(
     }
 
     suspend fun upsertCurrentUserProfile(alias: String) {
+        awaitAuthInitialization()
         val userId = requireCurrentUserId()
         val safeAlias = alias.trim().ifEmpty { "Rider" }
         client.postgrest["users_profile"].upsert(
@@ -341,6 +376,7 @@ class RealtimeRepository(
 
     suspend fun fetchUserProfiles(userIds: Set<String>): Map<String, UserProfile> {
         if (userIds.isEmpty()) return emptyMap()
+        awaitAuthInitialization()
         val rows = client.postgrest["users_profile"].select().decodeList<JsonObject>()
         return rows.mapNotNull { row ->
             val id = row["id"]?.jsonPrimitive?.contentOrNull ?: return@mapNotNull null
@@ -352,6 +388,7 @@ class RealtimeRepository(
     }
 
     suspend fun joinSession(sessionId: String): String {
+        awaitAuthInitialization()
         val normalizedSessionId = normalizeSessionId(sessionId)
         val userId = requireCurrentUserId()
 
@@ -382,6 +419,7 @@ class RealtimeRepository(
     }
 
     suspend fun fetchSessionTrails(sessionId: String): Map<String, List<PositionStreamItem>> {
+        awaitAuthInitialization()
         val rows = client.postgrest["position_stream"]
             .select {
                 filter {
@@ -432,10 +470,12 @@ class RealtimeRepository(
     }
 
     suspend fun fetchSessionMembers(sessionId: String): List<String> {
+        awaitAuthInitialization()
         val members = client.postgrest["session_members"]
             .select {
                 filter {
                     eq("session_id", sessionId)
+                    isIn("left_at", listOf(JsonNull))
                 }
             }
             .decodeList<JsonObject>()
@@ -445,7 +485,24 @@ class RealtimeRepository(
         }.distinct()
     }
 
+    suspend fun leaveSession(sessionId: String) {
+        awaitAuthInitialization()
+        val normalizedSessionId = normalizeSessionId(sessionId)
+        val userId = requireCurrentUserId()
+        client.postgrest["session_members"].update(
+            value = buildJsonObject {
+                put("left_at", Clock.System.now().toString())
+            }
+        ) {
+            filter {
+                eq("session_id", normalizedSessionId)
+                eq("user_id", userId)
+            }
+        }
+    }
+
     suspend fun connectRealtime(sessionId: String, userId: String, isTracking: Boolean) {
+        awaitAuthInitialization()
         if (connectedSessionId == sessionId && sessionChannel?.status?.value == RealtimeChannel.Status.SUBSCRIBED) {
             trackedUserId = userId
             trackedTrackingState = isTracking
@@ -547,6 +604,7 @@ class RealtimeRepository(
     }
 
     suspend fun ensureRealtimeConnected(sessionId: String, userId: String, isTracking: Boolean) {
+        awaitAuthInitialization()
         val channelStatus = sessionChannel?.status?.value
         if (connectedSessionId == sessionId && channelStatus == RealtimeChannel.Status.SUBSCRIBED) {
             if (_connectionState.value != RealtimeConnectionState.CONNECTED) {
@@ -573,6 +631,7 @@ class RealtimeRepository(
     }
 
     suspend fun updatePresence(isTracking: Boolean) {
+        awaitAuthInitialization()
         trackedTrackingState = isTracking
         val userId = trackedUserId ?: return
         val sessionId = connectedSessionId ?: return
@@ -596,71 +655,133 @@ class RealtimeRepository(
     }
 
     fun enqueueAndSync(sessionId: String) {
+        val shouldLaunch = synchronized(enqueuedSyncSessions) {
+            enqueuedSyncSessions.add(sessionId)
+        }
+        if (!shouldLaunch) return
         scope.launch(Dispatchers.IO) {
-            syncPending(sessionId)
+            try {
+                syncPending(sessionId)
+            } finally {
+                synchronized(enqueuedSyncSessions) {
+                    enqueuedSyncSessions.remove(sessionId)
+                }
+            }
         }
     }
 
     suspend fun syncPending(sessionId: String): Int {
-        val pendingCount = dao.countPendingSync(sessionId)
-        _syncStatus.value = _syncStatus.value.copy(
-            sessionId = sessionId,
-            pendingCount = pendingCount,
-            isSyncing = pendingCount > 0
-        )
-        if (pendingCount == 0) {
-            _syncStatus.value = _syncStatus.value.copy(
-                sessionId = sessionId,
-                pendingCount = 0,
-                isSyncing = false
-            )
-            return 0
-        }
+        return syncMutex.withLock {
+            var totalSynced = 0
+            var keepSyncing = true
 
-        val pending = dao.pendingSync(sessionId = sessionId, limit = 500)
-        if (pending.isEmpty()) {
-            _syncStatus.value = _syncStatus.value.copy(
-                sessionId = sessionId,
-                pendingCount = 0,
-                isSyncing = false
-            )
-            return 0
-        }
+            while (keepSyncing) {
+                val pendingCount = dao.countPendingSync(sessionId)
+                _syncStatus.value = _syncStatus.value.copy(
+                    sessionId = sessionId,
+                    pendingCount = pendingCount,
+                    isSyncing = pendingCount > 0
+                )
+                if (pendingCount == 0) {
+                    _syncStatus.value = _syncStatus.value.copy(
+                        sessionId = sessionId,
+                        pendingCount = 0,
+                        isSyncing = false,
+                        lastErrorMessage = null
+                    )
+                    keepSyncing = false
+                    continue
+                }
 
-        val payload = pending.map {
-            buildJsonObject {
-                put("user_id", it.userId)
-                put("session_id", it.sessionId)
-                put("timestamp", Instant.fromEpochMilliseconds(it.timestampMs).toString())
-                put("x", JsonPrimitive(it.xEastM))
-                put("y", JsonPrimitive(it.yNorthM))
-                put("z", JsonPrimitive(it.zUpM))
-                put("speed", JsonPrimitive(it.speedMps))
-                put("segment_type", it.segmentType.name.lowercase())
+                val pending = dao.pendingSync(sessionId = sessionId, limit = SYNC_BATCH_SIZE)
+                if (pending.isEmpty()) {
+                    _syncStatus.value = _syncStatus.value.copy(
+                        sessionId = sessionId,
+                        pendingCount = 0,
+                        isSyncing = false
+                    )
+                    keepSyncing = false
+                    continue
+                }
+
+                val selection = selectLiveUploadCandidates(
+                    pending = pending,
+                    previousAnchor = synchronized(liveUploadAnchorBySession) {
+                        liveUploadAnchorBySession[sessionId]
+                    }
+                )
+                val uploaded = pending.filter { it.id in selection.uploadIds }
+                val skipped = pending.filter { it.id in selection.skipIds }
+
+                if (uploaded.isEmpty()) {
+                    if (skipped.isNotEmpty()) {
+                        dao.markSynced(skipped.map { it.id })
+                    }
+                    val remaining = dao.countPendingSync(sessionId)
+                    _syncStatus.value = _syncStatus.value.copy(
+                        sessionId = sessionId,
+                        pendingCount = remaining,
+                        isSyncing = remaining > 0
+                    )
+                    if (remaining == 0) {
+                        keepSyncing = false
+                    }
+                    continue
+                }
+
+                val payload = uploaded.map {
+                    buildJsonObject {
+                        put("user_id", it.userId)
+                        put("session_id", it.sessionId)
+                        put("timestamp", Instant.fromEpochMilliseconds(it.timestampMs).toString())
+                        put("x", JsonPrimitive(it.xEastM))
+                        put("y", JsonPrimitive(it.yNorthM))
+                        put("z", JsonPrimitive(it.zUpM))
+                        put("speed", JsonPrimitive(it.speedMps))
+                        put("segment_type", it.segmentType.name.lowercase())
+                    }
+                }
+
+                try {
+                    awaitAuthInitialization()
+                    client.postgrest["position_stream"].insert(payload)
+                    val processedIds = buildList {
+                        addAll(uploaded.map { it.id })
+                        addAll(skipped.map { it.id })
+                    }
+                    if (processedIds.isNotEmpty()) {
+                        dao.markSynced(processedIds)
+                    }
+                    selection.newAnchor?.let { newAnchor ->
+                        synchronized(liveUploadAnchorBySession) {
+                            liveUploadAnchorBySession[sessionId] = newAnchor
+                        }
+                    }
+                    totalSynced += uploaded.size
+                    val remaining = dao.countPendingSync(sessionId)
+                    _syncStatus.value = SyncStatus(
+                        sessionId = sessionId,
+                        pendingCount = remaining,
+                        isSyncing = remaining > 0,
+                        lastSyncedAtMs = Clock.System.now().toEpochMilliseconds(),
+                        lastErrorMessage = null
+                    )
+                    if (remaining == 0) {
+                        keepSyncing = false
+                    }
+                } catch (error: Exception) {
+                    _syncStatus.value = SyncStatus(
+                        sessionId = sessionId,
+                        pendingCount = dao.countPendingSync(sessionId),
+                        isSyncing = false,
+                        lastSyncedAtMs = _syncStatus.value.lastSyncedAtMs,
+                        lastErrorMessage = toSafeSyncErrorMessage(error)
+                    )
+                    keepSyncing = false
+                }
             }
-        }
 
-        return try {
-            client.postgrest["position_stream"].insert(payload)
-            dao.markSynced(pending.map { it.id })
-            val remaining = dao.countPendingSync(sessionId)
-            _syncStatus.value = SyncStatus(
-                sessionId = sessionId,
-                pendingCount = remaining,
-                isSyncing = false,
-                lastSyncedAtMs = Clock.System.now().toEpochMilliseconds(),
-                lastErrorMessage = null
-            )
-            pending.size
-        } catch (error: Exception) {
-            _syncStatus.value = SyncStatus(
-                sessionId = sessionId,
-                pendingCount = dao.countPendingSync(sessionId),
-                isSyncing = false,
-                lastSyncedAtMs = _syncStatus.value.lastSyncedAtMs,
-                lastErrorMessage = error.message
-            )
-            0
+            totalSynced
         }
     }
 
@@ -771,5 +892,81 @@ class RealtimeRepository(
                 )
             )
         }.getOrNull()
+    }
+
+    private fun toSafeSyncErrorMessage(error: Throwable): String {
+        val rawMessage = error.message?.trim().orEmpty()
+        val message = rawMessage.lowercase()
+        return when {
+            "row-level security policy" in message ->
+                "Sync denied by server. Authentication or session membership is missing."
+            "authorization=[" in message || "apikey=[" in message || "http method:" in message ->
+                "Sync request failed. Reconnect and try again."
+            rawMessage.isBlank() ->
+                "Sync request failed."
+            else -> rawMessage.lineSequence().firstOrNull()?.trim().orEmpty().ifBlank { "Sync request failed." }
+        }
+    }
+}
+
+internal data class LiveUploadAnchor(
+    val timestampMs: Long,
+    val segmentType: SegmentType
+)
+
+internal data class LiveUploadSelection(
+    val uploadIds: Set<Long>,
+    val skipIds: Set<Long>,
+    val newAnchor: LiveUploadAnchor?
+)
+
+internal fun selectLiveUploadCandidates(
+    pending: List<TrackingPointEntity>,
+    previousAnchor: LiveUploadAnchor?
+): LiveUploadSelection {
+    if (pending.isEmpty()) {
+        return LiveUploadSelection(
+            uploadIds = emptySet(),
+            skipIds = emptySet(),
+            newAnchor = previousAnchor
+        )
+    }
+
+    var anchor = previousAnchor
+    val uploadIds = linkedSetOf<Long>()
+    val skipIds = linkedSetOf<Long>()
+
+    pending.forEach { point ->
+        val shouldUpload = when (val existing = anchor) {
+            null -> true
+            else -> {
+                point.segmentType != existing.segmentType ||
+                    point.timestampMs - existing.timestampMs >= uploadIntervalMsForSpeed(point.speedMps)
+            }
+        }
+
+        if (shouldUpload) {
+            uploadIds += point.id
+            anchor = LiveUploadAnchor(
+                timestampMs = point.timestampMs,
+                segmentType = point.segmentType
+            )
+        } else {
+            skipIds += point.id
+        }
+    }
+
+    return LiveUploadSelection(
+        uploadIds = uploadIds,
+        skipIds = skipIds,
+        newAnchor = anchor
+    )
+}
+
+internal fun uploadIntervalMsForSpeed(speedMps: Double): Long {
+    return when {
+        speedMps > 5.0 -> 500L
+        speedMps < 1.0 -> 2_000L
+        else -> 1_000L
     }
 }

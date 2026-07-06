@@ -96,8 +96,6 @@ class SessionViewModel(
 
     private var trackingCollectJob: Job? = null
     private var livePositionCollectJob: Job? = null
-    private val storedSessionCandidate = activeSessionStore.load()
-
     init {
         _ui.update { it.copy(rememberMe = authPreferencesStore.isRememberMeEnabled()) }
 
@@ -182,9 +180,12 @@ class SessionViewModel(
                 return@launch
             }
 
+            realtimeRepository.awaitAuthInitialization()
             val userId = realtimeRepository.currentUserIdOrNull()
             if (userId != null) {
                 val profile = runCatching { realtimeRepository.fetchUserProfiles(setOf(userId))[userId] }.getOrNull()
+                val cachedAlias = authPreferencesStore.cachedAliasFor(userId)
+                val storedSessionCandidate = activeSessionStore.load()
                 val resumeCandidate = resolveResumeCandidate(remember, userId, storedSessionCandidate)
                 if (storedSessionCandidate != null && resumeCandidate == null) {
                     activeSessionStore.clear()
@@ -195,7 +196,16 @@ class SessionViewModel(
                         isAuthenticated = true,
                         userId = userId,
                         pendingResumeSessionId = resumeCandidate?.sessionId,
-                        userProfiles = profile?.let { p -> it.userProfiles + (userId to p) } ?: it.userProfiles,
+                        userProfiles = when {
+                            profile != null -> {
+                                authPreferencesStore.cacheAlias(userId, profile.alias)
+                                it.userProfiles + (userId to profile)
+                            }
+                            cachedAlias != null -> {
+                                it.userProfiles + (userId to UserProfile(id = userId, alias = cachedAlias, color = "#60A5FA"))
+                            }
+                            else -> it.userProfiles
+                        },
                         errorMessage = null
                     )
                 }
@@ -412,6 +422,7 @@ class SessionViewModel(
             trackingCollectJob?.cancel()
             trackingCollectJob = null
             trackingRepository.stopTracking()
+            runCatching { realtimeRepository.leaveSession(previousSession) }
             realtimeRepository.disconnectRealtime(previousSession)
             activeSessionStore.clear()
         }
@@ -519,16 +530,20 @@ class SessionViewModel(
 
     private suspend fun fetchLiveSnapshot(sessionId: String) {
         runCatching {
-            realtimeRepository.fetchSessionTrails(sessionId)
-        }.onSuccess { trails ->
-            val userIds = trails.keys + _ui.value.userId + _ui.value.members + _ui.value.presentUserIds
+            coroutineScope {
+                val trailsDeferred = async { realtimeRepository.fetchSessionTrails(sessionId) }
+                val membersDeferred = async { realtimeRepository.fetchSessionMembers(sessionId) }
+                trailsDeferred.await() to membersDeferred.await()
+            }
+        }.onSuccess { (trails, members) ->
+            val userIds = trails.keys + members + _ui.value.userId + _ui.value.members + _ui.value.presentUserIds
             val profiles = runCatching { realtimeRepository.fetchUserProfiles(userIds.toSet()) }
                 .getOrElse { _ui.value.userProfiles }
             _ui.update {
                 it.copy(
                     remoteTrailsByUser = trails,
                     members = mergeMemberIds(
-                        existing = it.members,
+                        existing = it.members + members,
                         trailUserIds = trails.keys,
                         presentUserIds = it.presentUserIds,
                         currentUserId = it.userId
@@ -552,6 +567,7 @@ class SessionViewModel(
                     trackingCollectJob = null
                     realtimeRepository.syncPending(sessionId)
                     trackingRepository.stopTracking()
+                    runCatching { realtimeRepository.leaveSession(sessionId) }
                     realtimeRepository.disconnectRealtime(sessionId)
                 } finally {
                     runCatching {
@@ -590,6 +606,7 @@ class SessionViewModel(
                 realtimeRepository.login(email, password)
                 val userId = realtimeRepository.requireCurrentUserId()
                 val profile = runCatching { realtimeRepository.fetchUserProfiles(setOf(userId))[userId] }.getOrNull()
+                val storedSessionCandidate = activeSessionStore.load()
                 val resumeCandidate = resolveResumeCandidate(
                     rememberMe = _ui.value.rememberMe,
                     currentUserId = userId,
@@ -600,7 +617,12 @@ class SessionViewModel(
                         userId = userId,
                         isAuthenticated = true,
                         pendingResumeSessionId = resumeCandidate?.sessionId,
-                        userProfiles = profile?.let { p -> it.userProfiles + (userId to p) } ?: it.userProfiles,
+                        userProfiles = profile?.let { p ->
+                            authPreferencesStore.cacheAlias(userId, p.alias)
+                            it.userProfiles + (userId to p)
+                        } ?: authPreferencesStore.cachedAliasFor(userId)?.let { alias ->
+                            it.userProfiles + (userId to UserProfile(id = userId, alias = alias, color = "#60A5FA"))
+                        } ?: it.userProfiles,
                         errorMessage = null
                     )
                 }
@@ -628,6 +650,7 @@ class SessionViewModel(
                 realtimeRepository.upsertCurrentUserProfile(trimmedAlias)
                 val userId = realtimeRepository.requireCurrentUserId()
                 val profile = runCatching { realtimeRepository.fetchUserProfiles(setOf(userId))[userId] }.getOrNull()
+                val storedSessionCandidate = activeSessionStore.load()
                 val resumeCandidate = resolveResumeCandidate(
                     rememberMe = _ui.value.rememberMe,
                     currentUserId = userId,
@@ -639,8 +662,10 @@ class SessionViewModel(
                         isAuthenticated = true,
                         pendingResumeSessionId = resumeCandidate?.sessionId,
                         userProfiles = if (profile != null) {
+                            authPreferencesStore.cacheAlias(userId, profile.alias)
                             it.userProfiles + (userId to profile)
                         } else {
+                            authPreferencesStore.cacheAlias(userId, trimmedAlias)
                             it.userProfiles + (userId to UserProfile(id = userId, alias = trimmedAlias, color = "#60A5FA"))
                         },
                         errorMessage = null
@@ -660,6 +685,7 @@ class SessionViewModel(
         if (!realtimeRepository.handleAuthIntent(intent)) return
         runCatching { realtimeRepository.requireCurrentUserId() }
             .onSuccess { userId ->
+                val storedSessionCandidate = activeSessionStore.load()
                 val resumeCandidate = resolveResumeCandidate(
                     rememberMe = _ui.value.rememberMe,
                     currentUserId = userId,
@@ -676,7 +702,18 @@ class SessionViewModel(
                 viewModelScope.launch {
                     val profile = runCatching { realtimeRepository.fetchUserProfiles(setOf(userId))[userId] }.getOrNull()
                     if (profile != null) {
+                        authPreferencesStore.cacheAlias(userId, profile.alias)
                         _ui.update { it.copy(userProfiles = it.userProfiles + (userId to profile)) }
+                    } else {
+                        authPreferencesStore.cachedAliasFor(userId)?.let { cachedAlias ->
+                            _ui.update {
+                                it.copy(
+                                    userProfiles = it.userProfiles + (
+                                        userId to UserProfile(id = userId, alias = cachedAlias, color = "#60A5FA")
+                                    )
+                                )
+                            }
+                        }
                     }
                 }
             }
@@ -691,6 +728,7 @@ class SessionViewModel(
                 trackingRepository.stopTracking()
                 if (sessionId != null) {
                     realtimeRepository.syncPending(sessionId)
+                    runCatching { realtimeRepository.leaveSession(sessionId) }
                     runCatching { realtimeRepository.disconnectRealtime(sessionId) }
                 }
                 activeSessionStore.clear()

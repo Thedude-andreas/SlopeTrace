@@ -68,6 +68,10 @@ import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 
 class MainActivity : ComponentActivity() {
+    private companion object {
+        const val LIVE_SNAPSHOT_REFRESH_MS = 30_000L
+    }
+
     private lateinit var vm: SessionViewModel
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -270,7 +274,7 @@ class MainActivity : ComponentActivity() {
                                 LaunchedEffect(state.activeSessionId, state.isRealtimeConnected) {
                                     if (!state.isRealtimeConnected || state.activeSessionId == null) return@LaunchedEffect
                                     while (isActive) {
-                                        delay(2_000L)
+                                        delay(LIVE_SNAPSHOT_REFRESH_MS)
                                         vm.refreshLiveSnapshotSilently()
                                     }
                                 }
@@ -343,6 +347,14 @@ class MainActivity : ComponentActivity() {
                     }
                 }
             }
+        }
+    }
+
+    override fun onStart() {
+        super.onStart()
+        if (::vm.isInitialized) {
+            vm.initializeAuthState()
+            vm.refreshLiveSnapshotSilently()
         }
     }
 

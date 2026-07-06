@@ -84,4 +84,51 @@ class ClassificationEngineTest {
 
         assertTrue(confidence < 0.5)
     }
+
+    @Test
+    fun resetClearsStableStateAndIds() {
+        val engine = ClassificationEngine(windowSeconds = 5)
+        var t = 0L
+        var result = engine.classify(
+            ClassificationEngine.Sample(
+                timestampMs = t,
+                speedMps = 0.0,
+                zMeters = 0.0,
+                accelerationMagnitude = 0f,
+                horizontalAccuracyM = 10f
+            )
+        )
+
+        repeat(10) {
+            t += 1_000L
+            result = engine.classify(
+                ClassificationEngine.Sample(
+                    timestampMs = t,
+                    speedMps = 2.6,
+                    zMeters = t / 1_000.0,
+                    accelerationMagnitude = 0.08f,
+                    horizontalAccuracyM = 10f
+                )
+            )
+        }
+
+        assertEquals(SegmentType.LIFT, result.segmentType)
+        assertNotNull(result.liftId)
+        assertNull(result.runId)
+
+        engine.reset()
+        result = engine.classify(
+            ClassificationEngine.Sample(
+                timestampMs = t + 1_000L,
+                speedMps = 0.0,
+                zMeters = 0.0,
+                accelerationMagnitude = 0f,
+                horizontalAccuracyM = 10f
+            )
+        )
+
+        assertEquals(SegmentType.UNKNOWN, result.segmentType)
+        assertNull(result.runId)
+        assertNull(result.liftId)
+    }
 }

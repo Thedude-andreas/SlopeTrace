@@ -19,7 +19,7 @@ import kotlinx.coroutines.channels.awaitClose
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.callbackFlow
-import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.suspendCancellableCoroutine
@@ -92,7 +92,7 @@ class SensorRepository(
                 override fun onLocationResult(result: LocationResult) {
                     for (location in result.locations) {
                         val nextInterval = when {
-                            location.speed > 5f -> 200L
+                            location.speed > 5f -> 500L
                             location.speed < 1f -> 2000L
                             else -> 1000L
                         }
@@ -119,7 +119,7 @@ class SensorRepository(
             }
         }
 
-        return combine(locationFlow, pressureFlow, accelerationFlow) { location, pressure, acc ->
+        return locationFlow.map { location ->
             val horizontalAccuracy = if (location.hasAccuracy()) location.accuracy else null
             val gpsAltitude = if (location.hasAltitude()) location.altitude else null
             val verticalAccuracy = if (location.hasVerticalAccuracy()) location.verticalAccuracyMeters else null
@@ -131,8 +131,8 @@ class SensorRepository(
                 horizontalAccuracyM = horizontalAccuracy,
                 gpsAltitudeM = gpsAltitude,
                 gpsVerticalAccuracyM = verticalAccuracy,
-                pressureHpa = pressure,
-                accelerationMagnitude = acc
+                pressureHpa = pressureFlow.value,
+                accelerationMagnitude = accelerationFlow.value
             )
         }
     }
